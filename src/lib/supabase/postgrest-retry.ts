@@ -3,19 +3,21 @@ import { logger } from "@/lib/logger"
 /**
  * Workaround for PostgREST's sporadic "JWT issued at future" (PGRST303).
  *
- * Before PostgREST v16.3 / v14.18 its clock was cached and refreshed once a
- * second, so a token minted in the current second (say, right after sign-up
- * or sign-in) could be rejected as issued in the future. See
- * https://github.com/PostgREST/postgrest/issues/5196. The Supabase CLI still
- * ships v16.2, and hosted projects may run affected versions.
+ * Before PostgREST v16.3 / v14.18 the server read the time from a cache that
+ * could be badly stale (notably on the first request of a new connection), so
+ * a freshly minted token, say right after sign-up, was rejected as issued in
+ * the future. See https://github.com/PostgREST/postgrest/issues/5196 and
+ * supabase/discussions#48123 (hosted projects report it too).
  *
- * PostgREST validates the JWT before running any query, so retrying once
- * after the clock has caught up is safe for every method, reads and writes.
+ * Local and CI stacks run a fixed PostgREST (supabase/.temp/rest-version).
+ * This covers hosted projects: PostgREST validates the JWT before running any
+ * query, so retrying is safe for every method, reads and writes. An immediate
+ * retry usually succeeds; a later one covers a cache that needs a refresh.
  *
  * Remove when every environment runs PostgREST >= 16.3 (or >= 14.18).
  */
 
-const RETRY_DELAY_MS = 1_000
+const RETRY_DELAYS_MS = [200, 1_000] as const
 
 function requestUrl(input: RequestInfo | URL): string {
   if (typeof input === "string") return input
@@ -35,15 +37,18 @@ async function isClockSkewRejection(response: Response): Promise<boolean> {
 
 export function withPostgrestClockRetry(
   baseFetch: typeof fetch = fetch,
-  delayMs: number = RETRY_DELAY_MS
+  delaysMs: readonly number[] = RETRY_DELAYS_MS
 ): typeof fetch {
   return async (input, init) => {
-    const response = await baseFetch(input, init)
-    if (!requestUrl(input).includes("/rest/v1/") || !(await isClockSkewRejection(response))) {
-      return response
+    let response = await baseFetch(input, init)
+    if (!requestUrl(input).includes("/rest/v1/")) return response
+
+    for (const [attempt, delay] of delaysMs.entries()) {
+      if (!(await isClockSkewRejection(response))) return response
+      logger.warn("supabase.postgrest_clock_retry", { attempt: attempt + 1 })
+      await new Promise((resolve) => setTimeout(resolve, delay))
+      response = await baseFetch(input, init)
     }
-    logger.warn("supabase.postgrest_clock_retry")
-    await new Promise((resolve) => setTimeout(resolve, delayMs))
-    return baseFetch(input, init)
+    return response
   }
 }

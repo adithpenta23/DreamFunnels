@@ -22,7 +22,10 @@ next-env.d.ts
 !.env.example
 
 # supabase cli state
-/supabase/.temp
+# ...except rest-version, which pins the local PostgREST image (see docs/QA.md). `supabase link`
+# overwrites it with the linked project's version, which is what local parity wants.
+/supabase/.temp/*
+!/supabase/.temp/rest-version
 /supabase/.branches
 
 # vercel

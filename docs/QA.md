@@ -149,7 +149,15 @@ traces, not to excuse flakiness.
 3. A CI check that `npm run db:types` produces no diff, so migrations and types can't drift.
 4. Coverage reporting (`@vitest/coverage-v8`) with a floor on `src/lib` and `src/features/**/server`.
 5. Accessibility checks (`@axe-core/playwright`) on the auth pages, onboarding and settings.
+6. Preview-deployment smoke: run `PLAYWRIGHT_BASE_URL=<vercel preview url> npm run test:e2e`.
 
-Local E2E notes: runs use 2 workers (`playwright.config.ts`) because `next dev` compiles routes on
-demand and sign-ups hash passwords in the Auth container; menus are opened with a retrying helper
-(`e2e/support/flows.ts#openMenu`) because a click can land before a cold page hydrates. 6. Preview-deployment smoke: run `PLAYWRIGHT_BASE_URL=<vercel preview url> npm run test:e2e`.
+## Stack notes for E2E
+
+- **PostgREST is pinned to v16.3** via `supabase/.temp/rest-version` (tracked in git; the CLI still
+  defaults to v16.2). Older versions sporadically reject a just-issued token with PGRST303
+  ("JWT issued at future", PostgREST#5196), which made the sign-up journey flaky. Delete the file
+  once the CLI ships ≥ 16.3. `supabase link` rewrites it to match the linked hosted project.
+- Local runs use 2 workers (`playwright.config.ts`) because `next dev` compiles routes on demand
+  and sign-ups hash passwords in the Auth container. CI uses 1 worker on a production build.
+- Menus are opened with a retrying helper (`e2e/support/flows.ts#openMenu`) because a click can
+  land before a cold page hydrates.
