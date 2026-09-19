@@ -59,6 +59,7 @@ that depends on those is covered by `e2e/auth.spec.ts` against a real local Supa
 | Workspace creation / slug validation          | `features/workspaces/schemas.test.ts`, `lib/slug.test.ts`, `onboarding/schemas.test.ts`, RLS suite                                |
 | Authorization helpers, membership logic       | `features/workspaces/lib/access.test.ts`, `roles.test.ts`, `last-workspace.test.ts`, RLS suite                                    |
 | DB constraint → field error mapping           | `features/workspaces/lib/write-errors.test.ts`, `lib/supabase/db-errors.test.ts`                                                  |
+| PostgREST "JWT issued at future" retry        | `lib/supabase/postgrest-retry.test.ts`; E2E signups exercise it against the real stack                                            |
 | Shell, switcher, settings forms, app context  | `components/layout/app-shell.test.tsx`, `workspace-switcher.test.tsx`, `workspace-settings-form.test.tsx`, `app-context.test.tsx` |
 | Full journey (9 steps) + cross-tenant 404     | `e2e/auth.spec.ts` "a new user signs up, onboards, and keeps the right workspace across sessions"                                 |
 | Settings, second workspace, reset, tampering  | `e2e/auth.spec.ts` (remaining tests)                                                                                              |
@@ -142,10 +143,13 @@ traces, not to excuse flakiness.
 
 ## Next steps for QA (backlog)
 
-1. Run `e2e/auth.spec.ts` locally once Docker is installed, and regenerate `database.types.ts`.
-2. E2E for the email-confirmation path with confirmation enabled, reading the link from the local
+1. E2E for the email-confirmation path with confirmation enabled, reading the link from the local
    Mailpit API.
-3. `supabase db lint` in CI to catch Supabase-specific schema issues PGlite can't see.
+2. `supabase db lint` in CI to catch Supabase-specific schema issues PGlite can't see.
+3. A CI check that `npm run db:types` produces no diff, so migrations and types can't drift.
 4. Coverage reporting (`@vitest/coverage-v8`) with a floor on `src/lib` and `src/features/**/server`.
 5. Accessibility checks (`@axe-core/playwright`) on the auth pages, onboarding and settings.
-6. Preview-deployment smoke: run `PLAYWRIGHT_BASE_URL=<vercel preview url> npm run test:e2e`.
+
+Local E2E notes: runs use 2 workers (`playwright.config.ts`) because `next dev` compiles routes on
+demand and sign-ups hash passwords in the Auth container; menus are opened with a retrying helper
+(`e2e/support/flows.ts#openMenu`) because a click can land before a cold page hydrates. 6. Preview-deployment smoke: run `PLAYWRIGHT_BASE_URL=<vercel preview url> npm run test:e2e`.

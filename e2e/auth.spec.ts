@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test"
 import {
   completeOnboarding,
   newTestUser,
+  openWorkspaceSwitcher,
   signIn,
   signOut,
   signUp,
@@ -33,6 +34,9 @@ test("a new user signs up, onboards, and keeps the right workspace across sessio
   page,
   browser,
 }) => {
+  // Two complete sign-ups plus sign-out/sign-in cycles: well over one test's usual budget,
+  // especially against `next dev`, which compiles each route on its first visit.
+  test.slow()
   const founder = testUser("founder")
   let slug = ""
 
@@ -94,8 +98,7 @@ test("a new user signs up, onboards, and keeps the right workspace across sessio
 
     // The switcher only ever lists the founder's own workspace.
     await page.goto(`/w/${slug}`)
-    await workspaceSwitcher(page, founder.workspaceName).click()
-    const menu = page.getByRole("menu")
+    const menu = await openWorkspaceSwitcher(page, founder.workspaceName)
     await expect(menu.getByRole("menuitem", { name: founder.workspaceName })).toBeVisible()
     await expect(menu.getByText(outsider.workspaceName)).toHaveCount(0)
   })
@@ -105,8 +108,8 @@ test("a user can create a second workspace and switch between them", async ({ pa
   const user = testUser("switcher")
   const firstSlug = await signUpAndOnboard(page, user)
 
-  await workspaceSwitcher(page, user.workspaceName).click()
-  await page.getByRole("menuitem", { name: "Create workspace" }).click()
+  const menu = await openWorkspaceSwitcher(page, user.workspaceName)
+  await menu.getByRole("menuitem", { name: "Create workspace" }).click()
   await expect(page).toHaveURL("/workspaces/new")
   await page.getByLabel("Workspace name").fill(`${user.workspaceName} two`)
   await page.getByRole("button", { name: "Create workspace" }).click()
@@ -122,8 +125,8 @@ test("a user can create a second workspace and switch between them", async ({ pa
   await signIn(page, user)
   await expect(page).toHaveURL(`/w/${secondSlug}`)
 
-  await workspaceSwitcher(page, `${user.workspaceName} two`).click()
-  await page.getByRole("menuitem", { name: user.workspaceName, exact: true }).click()
+  const switcher = await openWorkspaceSwitcher(page, `${user.workspaceName} two`)
+  await switcher.getByRole("menuitem", { name: user.workspaceName, exact: true }).click()
   await expect(page).toHaveURL(`/w/${firstSlug}`)
 })
 

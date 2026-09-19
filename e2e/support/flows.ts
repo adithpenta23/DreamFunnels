@@ -1,4 +1,4 @@
-import { expect, type Page } from "@playwright/test"
+import { expect, type Locator, type Page } from "@playwright/test"
 
 /** Unique, obviously fake accounts per test run. */
 export function newTestUser(label: string) {
@@ -49,13 +49,30 @@ export async function signIn(page: Page, user: TestUser, password = user.passwor
   await page.getByRole("button", { name: "Sign in" }).click()
 }
 
+/**
+ * Opens a dropdown menu and returns it. A click that lands before the page has
+ * hydrated (common on a cold `next dev`) opens nothing, so retry until it does.
+ */
+export async function openMenu(page: Page, trigger: Locator): Promise<Locator> {
+  const menu = page.getByRole("menu")
+  await expect(async () => {
+    if (!(await menu.isVisible())) await trigger.click()
+    await expect(menu).toBeVisible({ timeout: 2_000 })
+  }).toPass({ timeout: 20_000 })
+  return menu
+}
+
 export async function signOut(page: Page) {
-  await page.getByRole("button", { name: "Account menu" }).click()
-  await page.getByRole("menuitem", { name: "Sign out" }).click()
+  const menu = await openMenu(page, page.getByRole("button", { name: "Account menu" }))
+  await menu.getByRole("menuitem", { name: "Sign out" }).click()
   await expect(page).toHaveURL(/\/login$/)
 }
 
 /** The workspace switcher's accessible name includes the current workspace. */
 export function workspaceSwitcher(page: Page, workspaceName: string) {
   return page.getByRole("button", { name: `Current workspace: ${workspaceName}. Switch workspace` })
+}
+
+export function openWorkspaceSwitcher(page: Page, workspaceName: string): Promise<Locator> {
+  return openMenu(page, workspaceSwitcher(page, workspaceName))
 }

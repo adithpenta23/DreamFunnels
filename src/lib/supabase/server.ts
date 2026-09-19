@@ -4,6 +4,9 @@ import { createServerClient } from "@supabase/ssr"
 import { cookies } from "next/headers"
 import { publicEnv } from "@/lib/env/public"
 import type { Database } from "@/types/database.types"
+import { withPostgrestClockRetry } from "./postgrest-retry"
+
+const postgrestFetch = withPostgrestClockRetry()
 
 /**
  * Supabase client for Server Components, Server Actions and Route Handlers.
@@ -18,6 +21,8 @@ export async function createClient() {
     publicEnv.NEXT_PUBLIC_SUPABASE_URL,
     publicEnv.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
     {
+      // Survives PostgREST's "JWT issued at future" right after sign-in (see postgrest-retry.ts).
+      global: { fetch: postgrestFetch },
       cookies: {
         getAll() {
           return cookieStore.getAll()

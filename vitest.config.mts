@@ -39,6 +39,9 @@ export default defineConfig({
           environment: "jsdom",
           include: ["src/**/*.test.tsx"],
           setupFiles: ["./src/test/setup-dom.ts"],
+          // jsdom + portalled menus can exceed the 5s default on a loaded machine
+          // (e.g. with Docker running); a real hang still fails.
+          testTimeout: 15_000,
         },
       },
       {

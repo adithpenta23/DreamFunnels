@@ -25,7 +25,10 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: isCI,
   retries: isCI ? 2 : 0,
-  workers: isCI ? 1 : undefined,
+  // Locally, `next dev` compiles routes on demand and every sign-up hashes a password in the
+  // Auth container; more than two parallel browsers saturates a laptop that also runs Docker.
+  // Pass --workers to override.
+  workers: isCI ? 1 : 2,
   // `next dev` compiles each route on first visit, so allow for cold starts.
   timeout: 60_000,
   expect: { timeout: 10_000 },

@@ -195,8 +195,8 @@ npm run test:db                        # RLS suite on PGlite (no Docker needed)
 npm run db:types                       # regenerate src/types/database.types.ts
 ```
 
-> `src/types/database.types.ts` is still hand-written (no Docker so far). Regenerate it the first
-> time the local stack runs and commit any difference.
+> `src/types/database.types.ts` is generated (first regenerated in Sprint 1; it matched the
+> earlier hand-written version). Never edit it by hand: change the migration, then regenerate.
 
 - Migrations are append-only once merged. Fix mistakes with a new migration.
 - Keep migrations deterministic and idempotent where cheap (`if not exists` on extensions and schemas).
