@@ -1,0 +1,11 @@
+<!-- Password reset. {{ .TokenHash }} links work across devices (see /auth/callback). -->
+<h2>Reset your password</h2>
+<p>Someone asked to reset the password for your DreamFunnels account.</p>
+<p>
+  <a
+    href="{{ .SiteURL }}/auth/callback?token_hash={{ .TokenHash }}&type=recovery&next=/reset-password"
+  >
+    Choose a new password
+  </a>
+</p>
+<p>This link expires in one hour. If you didn't ask for it, you can ignore this email.</p>

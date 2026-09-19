@@ -1,0 +1,6 @@
+-- Local development seed data, applied by `npm run db:reset` after migrations.
+--
+-- Intentionally empty: users are created by signing up through the app, and
+-- their first workspace by onboarding, which exercises the real signup trigger
+-- and create_workspace(). Add non-user reference data here as product tables
+-- arrive. Never put production data or real credentials in this file.
