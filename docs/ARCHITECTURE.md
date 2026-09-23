@@ -1,8 +1,9 @@
 # Architecture
 
-DreamFunnels is an AI-native funnel and website builder. This document describes the system as it
-stands after Sprint 1 (authentication, onboarding and workspaces, on the Sprint 0 foundation), the
-rules every feature must follow, and the decisions behind them. Keep it current: an architectural
+DreamFunnels is a funnel, website and lead-to-appointment platform for agencies and local-service
+businesses. This document describes the system as it stands after Sprint 2 (agency → client
+tenancy, business profiles, time zones and auth abuse protection, on the Sprint 0–1 foundation),
+the rules every feature must follow, and the decisions behind them. Keep it current: an architectural
 change isn't done until this file says so.
 
 ## At a glance
@@ -13,7 +14,9 @@ change isn't done until this file says so.
 | Hosting         | Vercel (Node.js runtime)                                                     |
 | Database & auth | Supabase: Postgres 17 + Auth, accessed via `@supabase/ssr`                   |
 | Authorization   | Postgres Row Level Security (RLS) + server-side guards                       |
+| Tenancy         | Workspaces: agencies, each with one level of client workspaces               |
 | Authentication  | Supabase Auth, email + password, sessions in HTTP-only cookies               |
+| Abuse control   | App-level rate limits (per IP and email, Postgres) + Turnstile CAPTCHA       |
 | UI              | Tailwind CSS v4, shadcn/ui (Base UI primitives, incl. Toast), lucide         |
 | Validation      | Zod 4 at every trust boundary (env, forms, actions)                          |
 | Client state    | Zustand, only for ephemeral UI state; React context for app context          |
@@ -40,9 +43,12 @@ flowchart LR
 ## Repository layout
 
 ```
-.github/workflows/ci.yml     CI quality gates
+.github/workflows/
+  ci.yml                     CI quality gates
+  deploy-database.yml        Manual: migrate a hosted project, then verify its Auth settings
 docs/                        Architecture, database and QA docs
-e2e/                         Playwright specs (smoke: no backend; auth: needs Supabase) + support/
+e2e/                         Playwright specs (smoke: no backend; auth, workspaces: need Supabase)
+scripts/verify-hosted-auth.mts  npm run verify:hosted (hosted Auth settings check)
 supabase/
   config.toml                Local stack config (auth settings, redirect URLs, ports)
   migrations/                Ordered SQL migrations: the schema's source of truth
@@ -66,8 +72,12 @@ src/
   config/                    Site metadata, the route map, workspace navigation
   features/<feature>/        Vertical slices (see below)
   lib/                       Cross-cutting infrastructure
-    env/                     Validated configuration (schema, public, server)
+    env/                     Validated configuration (schema, public, server; APP_ENV rules)
     supabase/                Client factories: server, client (browser), proxy, admin
+    rate-limit/              rateLimit(policy, subject) and its stores (Postgres, memory)
+    captcha/                 Turnstile verification (server) + constants shared with the widget
+    timezones.ts             IANA time zones: canonical list, validation, readable labels
+    countries.ts phone.ts request-ip.ts
     logger.ts monitoring.ts analytics.ts errors.ts action-result.ts run-action.ts
   stores/                    Global UI-only Zustand stores
   types/database.types.ts    Supabase-generated DB types
@@ -98,12 +108,12 @@ Rules:
 
 Current slices:
 
-| Slice        | Owns                                                                                       |
-| ------------ | ------------------------------------------------------------------------------------------ |
-| `auth`       | Sign up/in/out, password reset and change, session guards, auth error mapping, routing     |
-| `account`    | The user's profile (display name)                                                          |
-| `onboarding` | First-run setup: name + first workspace                                                    |
-| `workspaces` | Workspace CRUD, membership guards, slugs, switcher, last-workspace preference, settings UI |
+| Slice        | Owns                                                                                                |
+| ------------ | --------------------------------------------------------------------------------------------------- |
+| `auth`       | Sign up/in/out, password reset and change, session guards, error mapping, routing, abuse protection |
+| `account`    | The user's profile: name, phone, time zone, locale                                                  |
+| `onboarding` | First-run setup: name + first workspace (seeded with the browser's time zone and locale)            |
+| `workspaces` | Workspaces, access guards (incl. agency access), slugs, switcher, settings, business profile        |
 
 Future slices plug in the same way: `features/funnels`, `features/pages`, `features/publishing`,
 `features/domains`, `features/forms`, `features/contacts`, `features/email`,
@@ -118,10 +128,10 @@ session cookies are written on our own response.
 
 | Flow                      | Route(s)                             | How it works                                                                                                                                                                                                                                                                                                                |
 | ------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Sign up                   | `/signup`                            | `auth.signUp`. With email confirmation **off** there's a session at once → `/onboarding`. With it **on** (production) the form shows "check your email" (+ resend); the link goes through `/auth/callback` → `/dashboard`.                                                                                                  |
-| Sign in                   | `/login`                             | `auth.signInWithPassword` → safe `?next=` or `/dashboard`. Wrong email and wrong password get the same message.                                                                                                                                                                                                             |
+| Sign up                   | `/signup`                            | Rate limit and CAPTCHA, then `auth.signUp`. With email confirmation **off** (local) there's a session at once → `/onboarding`. With it **on** (staging, production) the form shows "check your email" (+ resend, rate-limited); the link goes through `/auth/callback` → `/dashboard`.                                      |
+| Sign in                   | `/login`                             | Rate limit, then `auth.signInWithPassword` → safe `?next=` or `/dashboard`. Wrong email and wrong password get the same message.                                                                                                                                                                                            |
 | Sign out                  | user menu, setup header              | `auth.signOut({ scope: "local" })`: this browser only; other devices stay signed in.                                                                                                                                                                                                                                        |
-| Forgot password           | `/forgot-password`                   | `auth.resetPasswordForEmail`. The UI always says "if an account exists", so it can't be used to discover accounts.                                                                                                                                                                                                          |
+| Forgot password           | `/forgot-password`                   | Rate limit and CAPTCHA, then `auth.resetPasswordForEmail`. The UI always says "if an account exists", so it can't be used to discover accounts.                                                                                                                                                                             |
 | Reset password            | `/auth/callback` → `/reset-password` | The emailed link signs the user in. The page and action only accept a session created by an **email link in the last hour**: JWT `amr` method `recovery` (PKCE link), `otp` (token_hash link; Supabase records every `/verify` as an OTP) or `magiclink` (`lib/recovery.ts`). Any other session must use "change password". |
 | Change password           | `/w/[slug]/settings/account`         | Requires the current password, checked on a detached client (`createDetachedClient`) so the user's own session isn't replaced; the extra session is ended immediately.                                                                                                                                                      |
 | After any password change |                                      | `auth.signOut({ scope: "others" })` revokes the user's other sessions, so a stolen session can't outlive the password.                                                                                                                                                                                                      |
@@ -140,13 +150,17 @@ Details:
   link goes back to `/forgot-password`, anything else to `/login`, each with a recoverable message.
   Every `?next=` passes through `getSafeRedirectPath` (no open redirects).
 - **Email confirmation**: off in local/CI config (`supabase/config.toml`) so the E2E journey and
-  local dev land straight in onboarding; **turn it on in hosted projects**. The code handles both.
+  local dev land straight in onboarding; **required in staging and production**. The code handles
+  both. Two guards stop a hosted project from silently running without it: `npm run verify:hosted`
+  (also run by the deploy-database workflow) fails when Supabase reports `mailer_autoconfirm`, and in
+  a hosted `APP_ENV` a sign-up that returns a session straight away logs
+  `security.email_confirmation_disabled` at error level.
 - Three client factories in `src/lib/supabase/`, plus one helper:
   - `server.ts#createClient`: Server Components, Actions and Route Handlers, acting **as the user** (RLS applies).
   - `server.ts#createDetachedClient`: user-scoped but not bound to request cookies (credential checks).
   - `client.ts`: browser (future realtime/uploads), acting as the user (RLS applies).
-  - `admin.ts`: secret key, **bypasses RLS**, server-only, for trusted jobs/webhooks. ESLint
-    blocks raw `createClient` imports everywhere else.
+  - `admin.ts`: secret key, **bypasses RLS**, server-only, for trusted jobs/webhooks and the auth
+    rate limiter's counters (a no-user path). ESLint blocks raw `createClient` imports elsewhere.
 
 ## Session handling
 
@@ -191,12 +205,12 @@ flowchart TD
 **Principle: never trust the client, and never trust a single layer.** There are four layers, each
 sufficient on its own:
 
-| Layer            | Where                                                         | What it does                                                                    |
-| ---------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| 1. Proxy         | `src/proxy.ts` (`getAuthRedirect`)                            | UX only: fast redirects to/from `/login`. Assume it can be bypassed.            |
-| 2. Session guard | `requireUser()`                                               | Verifies the JWT server-side in layouts, pages, actions and data functions.     |
-| 3. Tenant guard  | `requireWorkspaceMember(slug)` / `requireWorkspaceAccess(id)` | Loads the caller's membership through RLS and applies the role rule; see below. |
-| 4. Database      | RLS policies + column grants + constraints                    | The final word. Data outside the caller's workspaces is invisible.              |
+| Layer            | Where                                                         | What it does                                                                |
+| ---------------- | ------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| 1. Proxy         | `src/proxy.ts` (`getAuthRedirect`)                            | UX only: fast redirects to/from `/login`. Assume it can be bypassed.        |
+| 2. Session guard | `requireUser()`                                               | Verifies the JWT server-side in layouts, pages, actions and data functions. |
+| 3. Tenant guard  | `requireWorkspaceMember(slug)` / `requireWorkspaceAccess(id)` | Loads the caller's effective role through RLS and applies the role rule.    |
+| 4. Database      | RLS policies + column grants + constraints                    | The final word. Data outside the caller's workspaces is invisible.          |
 
 The tenant guards (`features/workspaces/server/queries.ts`) share one pure decision,
 `authorizeWorkspaceAccess(membership, minRole)` in `lib/access.ts` (unit-tested):
@@ -209,6 +223,10 @@ The tenant guards (`features/workspaces/server/queries.ts`) share one pure decis
   reference: access is always re-read through RLS, and the write itself runs under RLS again.
 - Role rules mirror RLS: `canManageWorkspace(role)` (admin+) gates workspace settings in the UI,
   the action (`requireWorkspaceAccess(id, "admin")`) and the `workspaces: admins can update` policy.
+- The role the guards see is the **effective** role, read from the `viewer_role` computed field
+  (`public.viewer_role(workspaces)`): the caller's own membership, or the role their agency
+  owner/admin membership carries into the agency's clients (see "Agency → client hierarchy"). So
+  "member" in `requireWorkspaceMember` means "has access", however it was granted.
 
 Rules for feature code:
 
@@ -227,7 +245,7 @@ Rules for feature code:
 ## Multi-tenancy
 
 - **Workspace = tenant.** Users belong to many workspaces via `workspace_members`, with the role
-  `member < admin < owner`.
+  `member < admin < owner`. A workspace is an **agency** (top level) or a **client** of one agency.
 - Every tenant-owned table carries `workspace_id` plus RLS policies that call the `private.*`
   helpers. `docs/DATABASE.md` has the copy-paste template.
 - Signup creates only the profile. The first workspace is created in **onboarding**, where the
@@ -253,6 +271,39 @@ Rules for feature code:
   written by the page rather than the proxy because the proxy also sees link prefetches.
 - **Future team members**: roles and RLS already support admins/members; invitations add a
   `workspace_invitations` table and an `accept_invitation()` function (see DATABASE.md).
+
+### Agency → client hierarchy
+
+Agencies manage many client businesses, so a workspace is either an **agency** or a **client**
+of exactly one agency. It's one level deep on purpose: no organisations table, no second
+membership model, no recursive trees.
+
+```mermaid
+flowchart TD
+  A["Agency workspace<br/>(owner, admins, members)"] --> C1["Client A"]
+  A --> C2["Client B"]
+  A --> C3["Client C"]
+```
+
+| Person                   | Agency  | Its clients           | Sibling clients / other agencies |
+| ------------------------ | ------- | --------------------- | -------------------------------- |
+| Agency **owner**         | owner   | **owner** (inherited) | nothing                          |
+| Agency **admin**         | admin   | **admin** (inherited) | nothing                          |
+| Agency **member**        | member  | nothing, unless added | nothing                          |
+| Client member (any role) | nothing | their own client only | nothing                          |
+| Someone with both        | direct  | the higher of the two | —                                |
+
+- Every self-serve workspace (onboarding, "Create workspace") is an agency: a single business is
+  simply an agency without clients. All pre-Sprint 2 workspaces became agencies. The UI doesn't
+  call them "agencies"; that's a data-model term.
+- The rule lives in one place, `private.user_workspace_ids()` (which workspaces) and
+  `private.workspace_role()` (which role), so every existing and future policy applies it.
+  Details, invariants and delete behaviour: `docs/DATABASE.md` "Agency → client hierarchy".
+- Nobody can change a workspace's type or parent through the API (no column grants). Creating
+  clients, moving them between agencies and detaching them are future trusted functions (the
+  agency onboarding sprint); until then there is no client-creation UI.
+- Client members can't see their agency, and so can't see agency staff's profiles either. Features
+  that show "managed by" or agency staff in a client need an explicit, narrow read path.
 
 ## Data access and mutations
 
@@ -288,6 +339,34 @@ Rules for feature code:
   (later) public endpoints.
 - Prefer server-side operations for anything sensitive. The browser Supabase client is for
   realtime and direct-to-storage uploads only.
+
+## Time zones, business profile and preferences
+
+- **Time zones are IANA ids** ("America/Chicago"), never offsets like `-5`, which lose daylight
+  saving. Workspaces have one (required, default `UTC`): it drives appointment times, reminders,
+  booking hours and reports. Profiles have one for a person's own notifications.
+- The database checks the shape and asks Postgres whether the zone exists
+  (`private.is_valid_timezone`, rejecting offsets, POSIX strings, `Etc/GMT±N` and wrong
+  capitalisation). The app offers a static list of 418 canonical ids (`lib/timezone-ids.ts`: ICU's
+  list with CLDR's legacy names mapped to current IANA ones, so `Asia/Calcutta` becomes
+  `Asia/Kolkata`), and `canonicalTimezone()` maps whatever a browser reports onto it.
+- Labels ("Central Time — Chicago", with "America/Chicago · GMT-6" underneath) come from Intl. The
+  server builds the option lists and passes them down, so browsers with different ICU data can't
+  cause hydration mismatches. Options sort west to east by the current offset.
+- New workspaces and profiles start in the **browser's** time zone and locale (hidden hints in
+  onboarding and "Create workspace", validated on the server; anything unusable falls back to UTC /
+  en-US). Both are editable in settings.
+- **Business profile** (workspace settings): business name (customer-facing; the workspace name
+  stays the internal label), email, phone, structured address, logo URL and two brand colours.
+  Phones are stored in E.164 (`+15125550100`, what SMS providers need); people type any common
+  format but must include the country code. Addresses are separate columns (line 1–2, city,
+  region, postal code, ISO country) because messaging compliance, schema.org data and booking
+  need the parts. Colours are named columns (`brand_primary_color`, `brand_secondary_color`),
+  not a JSON blob. Logo upload waits for Storage; today it's an https URL.
+- **Profile preferences** (account settings): mobile phone, time zone, and a locale for date and
+  number formatting (the UI itself is English).
+- The pickers are `components/forms/searchable-select.tsx`, a Base UI Combobox: type to filter
+  (every word must match label, IANA id or keywords, accent-insensitive), arrows, Enter, Escape.
 
 ## Error handling
 
@@ -334,6 +413,11 @@ Rules for feature code:
   deploy instead of a production request. Errors name keys and never print values.
 - Secrets live only in `.env.local` (git-ignored) and in Vercel/GitHub secrets. CI uses non-secret
   placeholders.
+- `APP_ENV` (`local` | `staging` | `production`, default `local`) says where a deployment runs.
+  `parseDeploymentEnv` (called by `next.config.ts`) fails a staging or production build that is
+  missing `SUPABASE_SECRET_KEY` or the Turnstile keys, uses http or a loopback Supabase URL, or
+  (production) uses Cloudflare's test keys. A Vercel deployment (`VERCEL_ENV` production or
+  preview) can't be `local`. Errors list every problem at once, by key name only.
 
 ## State management
 
@@ -367,9 +451,7 @@ Rules for feature code:
   - Credentials only pass through Server Actions (origin-checked by Next); never logged.
 - Tenant isolation is tested at three levels: RLS on PGlite, pure guard unit tests, and E2E
   (another user's workspace URL renders "Workspace not found").
-- **Rate limiting** relies on Supabase Auth's built-in limits for now. All auth calls reach
-  Supabase from our server's IP, so per-IP limits apply to the app as a whole: tune them in the
-  dashboard and add app-level, per-client limits (e.g. Upstash/Vercel KV) before launch.
+- **Rate limiting and CAPTCHA** on the public auth forms: see "Abuse protection" below.
 - **PostgREST clock bug** (PostgREST#5196): versions before v16.3 / v14.18 read the time from a
   cache that can be badly stale, so they sporadically reject a freshly minted token as "JWT issued
   at future" (PGRST303), which hit new users right after sign-up. Local and CI stacks pin the fixed
@@ -377,24 +459,119 @@ Rules for feature code:
   server client (`lib/supabase/postgrest-retry.ts`) retries such a request twice (after 0.2s and
   1s); the JWT is checked before any query runs, so this is safe for writes. Remove both once every
   environment runs a fixed PostgREST.
-- Not yet (tracked): Content-Security-Policy with nonces, app-level rate limiting, CAPTCHA on
-  sign-up, MFA, email change, account deletion, audit log.
+- **JWT verification**: `getClaims()` verifies tokens locally against the project's JWKS when the
+  project signs with an asymmetric key, and falls back to asking Auth when it only has the legacy
+  HS256 secret. Hosted projects must use asymmetric JWT signing keys (checked by
+  `npm run verify:hosted`; see "Deployment").
+- Not yet (tracked): Content-Security-Policy with nonces, MFA, email change, account deletion,
+  audit log, Supabase-native CAPTCHA (see below).
+
+## Abuse protection (rate limiting and CAPTCHA)
+
+Supabase Auth sees every request from our server's IP, so its per-IP limits can't tell our
+visitors apart. The public auth actions therefore protect themselves before calling Supabase
+(`features/auth/server/abuse-protection.ts`), in this order: per-IP limit, CAPTCHA (where
+required), per-email limit. Counting the email only after the CAPTCHA means nobody can spend a
+stranger's budget for free and lock them out of signing up or resetting a password:
+
+| Action                          | Rate limits (per window)                   | CAPTCHA |
+| ------------------------------- | ------------------------------------------ | ------- |
+| Sign in                         | 30 / 10 min per IP · 10 / 15 min per email | no      |
+| Sign up, resend confirmation    | 10 / hour per IP · 5 / hour per email      | sign-up |
+| Request a password reset        | 10 / hour per IP · 5 / hour per email      | yes     |
+| Change password (current check) | unchanged: Supabase's own sign-in limits   | no      |
+
+- **`rateLimit(policy, subject)`** (`lib/rate-limit`) is provider-agnostic: a policy is
+  `{ name, limit, windowSeconds }`, the result says `allowed`, `remaining`, `resetAt` and
+  `retryAfterSeconds`. Storage is a `RateLimitStore` with one method. Change limits in
+  `AUTH_RATE_LIMITS`; add a backend by writing a store.
+- **Backend**: Postgres fixed-window counters (`private.rate_limit_counters` through the
+  service-role-only `public.rate_limit_hit()`), shared by every server instance, with no new vendor
+  or package. Without `SUPABASE_SECRET_KEY` (local only) counters live in process memory. A Redis
+  store (e.g. Upstash over its REST API) can replace it if auth traffic ever makes these writes
+  matter.
+- Keys hold a SHA-256 prefix of the subject, never the email or IP. IPv6 clients count per /64.
+  Unknown IPs skip the per-IP check (per-email still applies). If the store fails, requests are let
+  through and the failure is reported (`security.rate_limit_unavailable`): a limiter outage must
+  not lock everyone out.
+- **Client IP** comes from `X-Forwarded-For`, which Vercel overwrites with the real client
+  address. Behind another proxy, make sure it does the same, or per-IP limits become advisory.
+- **CAPTCHA** is Cloudflare Turnstile, verified in our Server Action: the widget
+  (`components/forms/turnstile-widget.tsx`) writes a token into the form, and the action sends it to
+  Cloudflare's `siteverify` with the secret and the client IP. It must succeed **for the expected
+  action** (`signup` / `password_reset`), so a token can't be replayed on another form. Missing,
+  rejected or unverifiable tokens (Cloudflare unreachable: fails closed) get one generic message,
+  and logs carry only the reason and Cloudflare's error codes. The submit button waits for a token.
+- **Locally and in CI** the CAPTCHA is off when both Turnstile keys are unset (logged once as
+  `security.captcha_disabled`), so tests never call Cloudflare. The verifier is unit-tested against a
+  fake `siteverify`. Staging and production builds fail without the keys, and production rejects
+  Cloudflare's test keys.
+- **Direct API calls**: the publishable key lets anyone call Supabase Auth without our app. Those
+  requests carry the caller's real IP, so Supabase's own per-IP limits (and email-sending limits)
+  apply to them. Supabase's native CAPTCHA would also cover that path, but it applies to every
+  password sign-in too (including the password re-check before a password change), so it's a
+  deliberate later decision, not part of this sprint.
+- Blocked attempts log `security.rate_limit_blocked` with the policy name only.
 
 ## Deployment
 
-- **Vercel**: connect the repo, set the env vars from `.env.example` per environment (Production,
-  Preview, Development), and set `NEXT_PUBLIC_APP_URL` to each environment's URL. There's
-  nothing else to configure; `next build` runs the env validation.
-- **Supabase**: one project per environment (at minimum `staging` and `production`). Apply
-  migrations with `supabase link` + `supabase db push` from CI or a release step, never by hand in
-  the dashboard. In each Supabase project's Auth settings:
-  - URL Configuration: Site URL = the environment's `NEXT_PUBLIC_APP_URL`; add
-    `<APP_URL>/auth/callback` to the redirect allow-list.
-  - Email provider: **Confirm email ON**, minimum password length 8 (optionally leaked-password
-    protection on paid plans).
-  - Email templates: paste `supabase/templates/confirmation.html` and `recovery.html` (token_hash
-    links that work across devices) and configure custom SMTP (the default sender only emails the
-    project team).
+### Environments
+
+| Environment | Runs where                       | Supabase                           | `APP_ENV`    |
+| ----------- | -------------------------------- | ---------------------------------- | ------------ |
+| Local       | `npm run dev`, tests, CI         | local stack (`npm run db:start`)   | `local`      |
+| Staging     | Vercel (Preview or a custom env) | its **own** project (`staging`)    | `staging`    |
+| Production  | Vercel Production                | its **own** project (`production`) | `production` |
+
+Never point two environments at one Supabase project: data, users, keys and rate-limit counters
+must stay separate. Staging mirrors production's settings (confirmation on, asymmetric keys, real
+Turnstile widget for its hostname, or Cloudflare's always-pass test keys if preferred).
+
+### Setting up an environment (staging first, then production)
+
+1. **Supabase**: create the project. In Auth settings:
+   - URL Configuration: Site URL = the environment's `NEXT_PUBLIC_APP_URL`; add
+     `<APP_URL>/auth/callback` to the redirect allow-list.
+   - Email provider: **Confirm email ON**, minimum password length 8 (optionally leaked-password
+     protection on paid plans).
+   - Email templates: paste `supabase/templates/confirmation.html` and `recovery.html` (token_hash
+     links that work across devices) and configure custom SMTP (the default sender only emails the
+     project team).
+   - **JWT keys**: Project Settings → JWT Keys → migrate to JWT signing keys and rotate so tokens
+     are signed with the asymmetric (ECC P-256) key; keep the legacy secret only until old tokens
+     expire. Use the new publishable (`sb_publishable_…`) and secret (`sb_secret_…`) API keys.
+2. **Cloudflare Turnstile**: create a widget for the environment's hostname (managed mode) and
+   take its site key and secret.
+3. **GitHub**: create an Environment of the same name with secrets `SUPABASE_ACCESS_TOKEN`,
+   `SUPABASE_DB_PASSWORD` and variables `SUPABASE_PROJECT_REF`, `NEXT_PUBLIC_SUPABASE_URL`,
+   `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` (production: add required reviewers). Run the
+   **Deploy database** workflow: it links the project, lists and applies migrations
+   (`supabase db push`), then runs `npm run verify:hosted`, which fails unless email confirmation is
+   on and an asymmetric signing key is published. Migrations are never applied by hand in the
+   dashboard.
+4. **Vercel**: set every variable from `.env.example` for that environment, including
+   `APP_ENV`. The build refuses to run half-configured (see "Configuration and secrets").
+5. After a deploy, run the manual QA checklist in `docs/QA.md` on staging before promoting.
+
+What can't be checked from the repository and stays a manual verification per project: the
+Auth URL settings, SMTP, email templates, and that Turnstile's widget allows the right hostname.
+
+### Database connections
+
+The app never opens Postgres connections itself: every query goes over HTTPS to PostgREST
+(supabase-js), which keeps its own pool, and RLS runs per request, not per tenant. So more
+client workspaces don't mean more connections, and serverless instances can't exhaust the
+database. Keep it that way:
+
+- **App traffic**: supabase-js only. If a server-side job ever needs a direct Postgres driver, use
+  Supavisor's **transaction** pooler (port 6543) and a small pool per instance; never the direct
+  connection from serverless functions.
+- **Migrations**: the Supabase CLI (`db push`, from the workflow) uses a direct/session connection,
+  which DDL needs. Nothing else should hold one.
+- **Local and tests**: the local stack's Postgres (E2E, `db:types`) and PGlite in-process (RLS
+  suite); no pooler needed (`[db.pooler]` stays disabled in `config.toml`).
+- **Watch**: PostgREST's pool is sized by the project's compute. If Supabase's reports show
+  connection pressure, move up a compute size before adding pooling layers.
 
 ## Extension points (planned, not built)
 
@@ -409,29 +586,70 @@ Rules for feature code:
 | Automations      | An event table + worker. Start with Postgres-backed jobs (`pg_cron`/Supabase Queues) before any external workflow engine.                                                                  |
 | AI generation    | `features/ai` server-only module calling the Claude API. Outputs are validated against the page JSON schema before saving; usage is metered per workspace.                                 |
 | Payments         | `features/billing` with Stripe. Webhooks are route handlers using the admin client; plan limits are enforced server-side and mirrored in RLS where it matters.                             |
+| Snapshots        | `features/snapshots`: an agency packages allowlisted, `source_key`-identified configuration and deploys it into a client workspace through a trusted function. Follows the rules below.    |
+
+## Snapshot-readiness rules
+
+Snapshots aren't built yet, but the platform's core promise is that an agency can clone a proven
+setup (pages, forms, pipelines, automations) into a new client quickly and repeatedly. Every
+table and feature from now on follows these rules, so snapshots don't need a rewrite later:
+
+1. **Child slugs are unique per workspace, not globally**: `unique (workspace_id, slug)`. Two
+   clients deployed from one snapshot must both get `/book-now`. The only global uniqueness is
+   for things that really are global: workspace slugs (URL space) and, later, domains/hostnames.
+2. **Every clonable entity has a stable `source_key`** (e.g. `roofing.lead_followup_v1`): the
+   identity of the logical asset across deployments. UUIDs are per deployment; `source_key` is
+   how a snapshot, an update or a report finds "the same" thing in another workspace. Unique per
+   workspace, nullable for things users make from scratch.
+3. **Credentials are never part of a snapshot.** No API keys, access or refresh tokens, OAuth or
+   Stripe secrets, Twilio credentials, private keys or email passwords. Snapshots may carry
+   integration configuration and logical bindings ("SMS via the workspace's Twilio
+   connection"); the target workspace reconnects its own credentials. Keep credentials in their
+   own tables so no clone can pick them up by accident.
+4. **Cloning uses an allowlist.** The snapshot code lists each clonable table and column
+   explicitly. "Copy everything except the private fields" is forbidden: a new column must never
+   become clonable by default.
+5. **JSON configuration carries `schema_version`.** A `jsonb` document (page content, workflow
+   definitions) has a `schema_version` column next to it and a versioned Zod schema, so old
+   snapshots can be migrated on deploy. `jsonb` is for real documents, not to avoid modelling.
+6. **Deploying regenerates ids and remaps references.** Every row gets a new UUID in the target
+   workspace, and every foreign key inside the snapshot (a form's pipeline, a workflow's template,
+   ids inside JSON) is remapped through a source-id → new-id map. Never assume a source UUID
+   exists, or means the same thing, in another workspace.
 
 ## Decision log
 
-| #   | Decision                                                                       | Why                                                                                                                                                                                                                                               |
-| --- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Modular monolith on Next.js + Supabase                                         | One deployable for a solo founder; features are isolated by folder, not by network hop.                                                                                                                                                           |
-| 2   | RLS is the tenant-isolation boundary                                           | Isolation holds even if app code has a bug or a new query forgets a filter.                                                                                                                                                                       |
-| 3   | Authorization helpers are `SECURITY DEFINER` in a non-exposed `private` schema | Avoids RLS recursion on `workspace_members`, keeps helpers off the REST API, and gives one place to change policy logic.                                                                                                                          |
-| 4   | Membership writes only via SQL functions                                       | Guarantees "every workspace has an owner" and blocks self-joining or unconsented adds.                                                                                                                                                            |
-| 5   | Workspace in the URL, not a cookie                                             | Shareable links, multi-tab safety, no stale context.                                                                                                                                                                                              |
-| 6   | ~~Passwordless email auth~~ Superseded by 13 (Sprint 1)                        | Product requirement: email + password with reset. Supabase stores the hashes; the flows below keep the risk contained.                                                                                                                            |
-| 7   | Proxy is not a security boundary                                               | Proxy/middleware has had bypass CVEs. Every layer re-verifies.                                                                                                                                                                                    |
-| 8   | RLS tested on PGlite (Postgres in WASM)                                        | Runs real migrations and real policies under real roles in about 2s with no Docker. Fast enough to run on every commit.                                                                                                                           |
-| 9   | No Sentry/PostHog SDKs yet; interfaces only                                    | "No library without a requirement." Call sites already use the seams, so adoption is a one-file change.                                                                                                                                           |
-| 10  | shadcn/ui on Base UI with the `cn` package                                     | This is the current shadcn default, so future `shadcn add` output matches. `cn` is pinned exactly because it's pre-1.0.                                                                                                                           |
-| 11  | Hand-written logger instead of pino                                            | pino needs bundler workarounds in Next.js; the requirement (structured JSON plus redaction) is about 100 lines.                                                                                                                                   |
-| 12  | npm (not pnpm)                                                                 | Zero extra tooling locally, on Vercel or in CI.                                                                                                                                                                                                   |
-| 13  | Email + password auth; first workspace created in onboarding, not at signup    | Sprint 1 requirement. Users name their workspace (and URL) instead of getting "Jane's workspace"; "no membership" = "needs onboarding", so no flag to drift.                                                                                      |
-| 14  | Slug generation in SQL (`create_workspace`), mirrored in TS only for previews  | Uniqueness needs a global view that RLS hides from users; generating in the definer function avoids an "is this slug taken?" endpoint that would leak other tenants.                                                                              |
-| 15  | Reserved slugs enforced by a CHECK constraint                                  | Keeps `www`, `app`, `api`, … free for routes and future subdomains, whichever code path writes the row.                                                                                                                                           |
-| 16  | Reset password only in a recent email-link session (JWT `amr`)                 | Otherwise `/reset-password` would be a "change password without the current one" backdoor for any stolen session. Accepts `recovery`, `otp` and `magiclink`, because the method depends on the link style.                                        |
-| 17  | Verify the current password on a detached client                               | Supabase only enforces the current password via a project setting; checking in the app works everywhere without touching the user's session.                                                                                                      |
-| 18  | Last workspace remembered in a user-scoped cookie written by the page          | Restores the right workspace after sign-in without a DB write per navigation; the proxy would also see prefetches. Validated against memberships, never trusted.                                                                                  |
-| 19  | Toasts on Base UI Toast, no `sonner`                                           | Requirement met with a dependency we already ship ("no new dependency without a requirement").                                                                                                                                                    |
-| 20  | Authenticated E2E against a real local Supabase in CI                          | Tests Auth + PostgREST + RLS exactly as deployed. Locally it needs Docker; without it the suite skips (CI sets `E2E_REQUIRE_SUPABASE=1` to fail instead).                                                                                         |
-| 21  | Pin PostgREST v16.3 locally/in CI and retry PGRST303 in the app                | The pin removes the root cause where we control the stack (a single delayed retry proved insufficient in CI); the retry protects hosted projects, where users reported the same error. Both are removable once PostgREST ≥ 16.3 ships everywhere. |
+| #   | Decision                                                                           | Why                                                                                                                                                                                                                                               |
+| --- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Modular monolith on Next.js + Supabase                                             | One deployable for a solo founder; features are isolated by folder, not by network hop.                                                                                                                                                           |
+| 2   | RLS is the tenant-isolation boundary                                               | Isolation holds even if app code has a bug or a new query forgets a filter.                                                                                                                                                                       |
+| 3   | Authorization helpers are `SECURITY DEFINER` in a non-exposed `private` schema     | Avoids RLS recursion on `workspace_members`, keeps helpers off the REST API, and gives one place to change policy logic.                                                                                                                          |
+| 4   | Membership writes only via SQL functions                                           | Guarantees "every workspace has an owner" and blocks self-joining or unconsented adds.                                                                                                                                                            |
+| 5   | Workspace in the URL, not a cookie                                                 | Shareable links, multi-tab safety, no stale context.                                                                                                                                                                                              |
+| 6   | ~~Passwordless email auth~~ Superseded by 13 (Sprint 1)                            | Product requirement: email + password with reset. Supabase stores the hashes; the flows below keep the risk contained.                                                                                                                            |
+| 7   | Proxy is not a security boundary                                                   | Proxy/middleware has had bypass CVEs. Every layer re-verifies.                                                                                                                                                                                    |
+| 8   | RLS tested on PGlite (Postgres in WASM)                                            | Runs real migrations and real policies under real roles in about 2s with no Docker. Fast enough to run on every commit.                                                                                                                           |
+| 9   | No Sentry/PostHog SDKs yet; interfaces only                                        | "No library without a requirement." Call sites already use the seams, so adoption is a one-file change.                                                                                                                                           |
+| 10  | shadcn/ui on Base UI with the `cn` package                                         | This is the current shadcn default, so future `shadcn add` output matches. `cn` is pinned exactly because it's pre-1.0.                                                                                                                           |
+| 11  | Hand-written logger instead of pino                                                | pino needs bundler workarounds in Next.js; the requirement (structured JSON plus redaction) is about 100 lines.                                                                                                                                   |
+| 12  | npm (not pnpm)                                                                     | Zero extra tooling locally, on Vercel or in CI.                                                                                                                                                                                                   |
+| 13  | Email + password auth; first workspace created in onboarding, not at signup        | Sprint 1 requirement. Users name their workspace (and URL) instead of getting "Jane's workspace"; "no membership" = "needs onboarding", so no flag to drift.                                                                                      |
+| 14  | Slug generation in SQL (`create_workspace`), mirrored in TS only for previews      | Uniqueness needs a global view that RLS hides from users; generating in the definer function avoids an "is this slug taken?" endpoint that would leak other tenants.                                                                              |
+| 15  | Reserved slugs enforced by a CHECK constraint                                      | Keeps `www`, `app`, `api`, … free for routes and future subdomains, whichever code path writes the row.                                                                                                                                           |
+| 16  | Reset password only in a recent email-link session (JWT `amr`)                     | Otherwise `/reset-password` would be a "change password without the current one" backdoor for any stolen session. Accepts `recovery`, `otp` and `magiclink`, because the method depends on the link style.                                        |
+| 17  | Verify the current password on a detached client                                   | Supabase only enforces the current password via a project setting; checking in the app works everywhere without touching the user's session.                                                                                                      |
+| 18  | Last workspace remembered in a user-scoped cookie written by the page              | Restores the right workspace after sign-in without a DB write per navigation; the proxy would also see prefetches. Validated against memberships, never trusted.                                                                                  |
+| 19  | Toasts on Base UI Toast, no `sonner`                                               | Requirement met with a dependency we already ship ("no new dependency without a requirement").                                                                                                                                                    |
+| 20  | Authenticated E2E against a real local Supabase in CI                              | Tests Auth + PostgREST + RLS exactly as deployed. Locally it needs Docker; without it the suite skips (CI sets `E2E_REQUIRE_SUPABASE=1` to fail instead).                                                                                         |
+| 21  | Pin PostgREST v16.3 locally/in CI and retry PGRST303 in the app                    | The pin removes the root cause where we control the stack (a single delayed retry proved insufficient in CI); the retry protects hosted projects, where users reported the same error. Both are removable once PostgREST ≥ 16.3 ships everywhere. |
+| 22  | Agencies and clients are workspaces, one level deep                                | Reuses the workspace/membership model, RLS and guards instead of an organisations layer. Depth 1 covers agency → client; arbitrary trees would make every access check recursive.                                                                 |
+| 23  | Hierarchy invariants as constraints, not triggers                                  | A CHECK plus a composite foreign key to (id, 'agency') enforce "clients have an agency parent, agencies have none, depth 1" for every writer and under concurrency; RESTRICT stops an agency delete from cascading into its clients.              |
+| 24  | Agency owners/admins inherit their role in clients; agency members inherit nothing | Matches how agencies work (managers run client accounts, staff get added explicitly). Implemented in `user_workspace_ids()`/`workspace_role()`, so every policy follows it.                                                                       |
+| 25  | Effective role via the `viewer_role` computed field                                | The inner join on `workspace_members` couldn't see inherited access. A PostgREST computed field keeps one typed query, with RLS still deciding visibility.                                                                                        |
+| 26  | IANA time zone ids, validated in SQL, from a static canonical list                 | Offsets lose daylight saving. A committed list keeps server and browsers in agreement (runtimes disagree on legacy ids and labels).                                                                                                               |
+| 27  | Structured address and named brand colour columns, E.164 phones                    | Messaging compliance, schema.org data and SMS providers need the parts; JSON blobs would dodge constraints (snapshot rule 5).                                                                                                                     |
+| 28  | App-level auth rate limits behind a store interface, Postgres first                | Supabase sees our server's IP for every user. Postgres counters need no new vendor, secret or package, work in every environment and are tested end to end; Redis can replace them by adding one store.                                           |
+| 29  | Turnstile verified by our Server Actions, not Supabase-native CAPTCHA              | Lets us protect sign-up and reset without forcing CAPTCHA on every sign-in and on the password re-check; keeps verification testable without Cloudflare.                                                                                          |
+| 30  | `APP_ENV` plus build-time deployment validation                                    | A staging or production deploy without CAPTCHA, rate-limit storage or https must fail the build, not run half-protected. Vercel deploys can't claim to be local.                                                                                  |
+| 31  | Hosted Auth settings verified from outside (`verify:hosted`)                       | Email confirmation and JWT signing keys are dashboard settings the repo can't set; public Auth endpoints reveal both, so the deploy workflow checks them.                                                                                         |
+| 32  | No new dependencies in Sprint 2                                                    | Searchable selects use Base UI's Combobox (already installed); Turnstile and siteverify need no SDK; the rate limiter needs no Redis client.                                                                                                      |

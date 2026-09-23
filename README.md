@@ -1,10 +1,14 @@
 # DreamFunnels
 
-AI-native funnel and website builder. Next.js 16 · Supabase · TypeScript · Tailwind v4 · shadcn/ui.
+Funnels, websites and lead-to-appointment systems for agencies and local-service businesses.
+Next.js 16 · Supabase · TypeScript · Tailwind v4 · shadcn/ui.
 
-> Status after Sprint 1: email + password auth (sign up, sign in, password reset and change),
-> onboarding, multi-tenant workspaces with RLS (create, rename, change URL, switch), the dashboard
-> shell and settings. Product modules (funnels, websites, leads, …) are not built yet.
+> Status after Sprint 2: email + password auth with app-level rate limiting and a Turnstile
+> CAPTCHA, onboarding, multi-tenant workspaces with RLS, including agencies with client workspaces
+> (agency owners/admins reach their clients), a workspace business profile with IANA time zones,
+> personal preferences, the dashboard shell and settings. Local/staging/production environments
+> are defined in code. Product modules (funnels, websites, CRM, messaging, booking, snapshots, …)
+> are not built yet.
 
 ## Quick start
 
@@ -25,13 +29,17 @@ Pick one:
 - **Local stack (recommended)**: needs Docker. `npm run db:start` applies
   `supabase/migrations` and the auth settings in `supabase/config.toml` (8-character passwords,
   email confirmation off so sign-up goes straight to onboarding). Copy the API URL, publishable
-  key and secret key from `npx supabase status` into `.env.local`. Password-reset emails appear in
-  Mailpit at http://127.0.0.1:54324.
-- **Hosted project**: create a project, run `npx supabase link --project-ref <ref>` and
-  `npx supabase db push`. Then, in Auth settings: set the Site URL and add
-  `<APP_URL>/auth/callback` to the redirect URLs; turn **Confirm email** on; set the minimum
-  password length to 8; paste `supabase/templates/*.html` into the email templates; and configure
-  custom SMTP (see `docs/ARCHITECTURE.md#deployment`).
+  key and secret key from `npx supabase status` into `.env.local` (the secret key also backs the
+  auth rate limiter; without it counters live in memory). Leave `APP_ENV` and the Turnstile keys
+  empty: the CAPTCHA is off locally. Password-reset emails appear in Mailpit at
+  http://127.0.0.1:54324. After pulling new migrations, run `npm run db:reset` (wipes local data)
+  or `npx supabase migration up --local` (keeps it).
+- **Staging / production**: one Supabase project, Turnstile widget and Vercel environment each,
+  with `APP_ENV=staging|production`. Follow `docs/ARCHITECTURE.md` "Deployment": Auth settings
+  (Site URL, redirect URL, **Confirm email on**, templates, SMTP, **asymmetric JWT signing keys**),
+  then the **Deploy database** GitHub workflow, which applies migrations and runs
+  `npm run verify:hosted`. Staging and production builds refuse to run without their required
+  settings.
 
 ## Scripts
 
@@ -48,6 +56,7 @@ Pick one:
 | `npm run test:db`         | Tenant-isolation (RLS) tests on in-process Postgres (no Docker)          |
 | `npm run test:e2e`        | Playwright: smoke + signed-in flows (`test:e2e:install` once first)      |
 | `npm run db:*`            | Supabase CLI helpers: `start`, `stop`, `reset`, `migration:new`, `types` |
+| `npm run verify:hosted`   | Checks a hosted project's Auth: confirmation on, asymmetric JWT keys     |
 
 ## Documentation
 

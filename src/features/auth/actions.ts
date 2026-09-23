@@ -4,7 +4,10 @@ import type { Route } from "next"
 import { redirect } from "next/navigation"
 import { routes } from "@/config/routes"
 import { ok, validationFailed, type ActionFailure, type ActionResult } from "@/lib/action-result"
+import { CAPTCHA_FIELD } from "@/lib/captcha/shared"
 import { publicEnv } from "@/lib/env/public"
+import { isHostedEnv } from "@/lib/env/schema"
+import { serverEnv } from "@/lib/env/server"
 import { AppError } from "@/lib/errors"
 import { logger } from "@/lib/logger"
 import { runAction } from "@/lib/run-action"
@@ -20,6 +23,7 @@ import {
   signInSchema,
   signUpSchema,
 } from "./schemas"
+import { limitAuthByEmail, limitAuthByIp, requireHuman } from "./server/abuse-protection"
 import { signOutOtherSessions, verifyCurrentPassword } from "./server/password"
 import { isRecoverySession, requireUser } from "./server/session"
 
@@ -27,6 +31,10 @@ import { isRecoverySession, requireUser } from "./server/session"
  * Authentication mutations. Each one validates with Zod, talks to Supabase
  * Auth with the request-scoped client (so session cookies are written on the
  * response), and returns an ActionResult — or redirects on success.
+ *
+ * The public, pre-sign-in actions are rate-limited per IP and per email, and
+ * sign-up and password reset also require a CAPTCHA (server/abuse-protection.ts)
+ * before Supabase is called.
  *
  * Logs carry event names and error codes only: never emails or passwords.
  */
@@ -48,6 +56,8 @@ export async function signIn(_previous: SignInState, formData: FormData): Promis
   const { email, password, next } = parsed.data
 
   const result = await runAction("auth.signIn", async () => {
+    await limitAuthByIp("signIn")
+    await limitAuthByEmail("signIn", email)
     const supabase = await createClient()
     const { error } = await supabase.auth.signInWithPassword({ email, password })
     if (error) throw toAuthAppError(error, "sign_in")
@@ -74,6 +84,9 @@ export async function signUp(_previous: SignUpState, formData: FormData): Promis
   const { email, password } = parsed.data
 
   const result = await runAction("auth.signUp", async () => {
+    await limitAuthByIp("signUp")
+    await requireHuman(formData.get(CAPTCHA_FIELD), "signup")
+    await limitAuthByEmail("signUp", email)
     const supabase = await createClient()
     const { data, error } = await supabase.auth.signUp({
       email,
@@ -89,6 +102,11 @@ export async function signUp(_previous: SignUpState, formData: FormData): Promis
     // way, so sign-up can't be used to discover who has an account.)
     const needsConfirmation = data.session === null
     logger.info("auth.signed_up", { needsConfirmation })
+    if (!needsConfirmation && isHostedEnv(serverEnv.APP_ENV)) {
+      // Hosted projects must require email confirmation (docs/ARCHITECTURE.md
+      // "Deployment"). A session straight after sign-up means it's off.
+      logger.error("security.email_confirmation_disabled", { appEnv: serverEnv.APP_ENV })
+    }
     return { needsConfirmation }
   })
   if (!result.ok) return result
@@ -103,6 +121,8 @@ export async function resendConfirmation(email: string): Promise<ActionResult<nu
   if (!parsed.success) return validationFailed(parsed.error)
 
   return runAction("auth.resendConfirmation", async () => {
+    await limitAuthByIp("signUp")
+    await limitAuthByEmail("signUp", parsed.data)
     const supabase = await createClient()
     const { error } = await supabase.auth.resend({
       type: "signup",
@@ -143,6 +163,9 @@ export async function requestPasswordReset(
   const { email } = parsed.data
 
   return runAction("auth.requestPasswordReset", async () => {
+    await limitAuthByIp("passwordReset")
+    await requireHuman(formData.get(CAPTCHA_FIELD), "password_reset")
+    await limitAuthByEmail("passwordReset", email)
     const supabase = await createClient()
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
       redirectTo: buildAuthCallbackUrl(publicEnv.NEXT_PUBLIC_APP_URL, routes.resetPassword),

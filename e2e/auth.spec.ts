@@ -10,6 +10,7 @@ import {
   workspaceSwitcher,
   type TestUser,
 } from "./support/flows"
+import { giveEachTestItsOwnIp } from "./support/client-ip"
 import { adminClient, deleteUsers, passwordResetLink, requireSupabase } from "./support/supabase"
 
 /**
@@ -18,6 +19,7 @@ import { adminClient, deleteUsers, passwordResetLink, requireSupabase } from "./
  * stack is running; required in CI.
  */
 requireSupabase()
+giveEachTestItsOwnIp()
 
 const created: TestUser[] = []
 function testUser(label: string) {
@@ -252,4 +254,38 @@ test("an existing email can't be registered twice", async ({ page }) => {
   await expect(
     page.getByText("An account with this email already exists. Sign in instead.")
   ).toBeVisible()
+})
+
+test("sign-in attempts are rate-limited per email address", async ({ page }) => {
+  // Unknown addresses count too: the limit must not reveal who has an account.
+  const target = newTestUser("ratelimit")
+  const neighbour = newTestUser("neighbour")
+  const password = page.getByLabel("Password", { exact: true })
+
+  /** One attempt, waiting until the action has settled (React then clears the password). */
+  const attempt = async (email: string) => {
+    await page.getByLabel("Email").fill(email)
+    await password.fill("wrong password")
+    await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" && new URL(response.url()).pathname === "/login"
+      ),
+      page.getByRole("button", { name: "Sign in" }).click(),
+    ])
+    await expect(password).toHaveValue("")
+  }
+
+  await page.goto("/login")
+  // AUTH_RATE_LIMITS.signIn.email: 10 attempts per 15 minutes.
+  for (let count = 1; count <= 10; count += 1) {
+    await attempt(target.email)
+    await expect(page.getByText("Incorrect email or password.")).toBeVisible()
+  }
+  await attempt(target.email)
+  await expect(page.getByText(/Too many attempts\. Please wait \d+ minutes/)).toBeVisible()
+
+  // Another address from the same browser (same IP) is unaffected.
+  await attempt(neighbour.email)
+  await expect(page.getByText("Incorrect email or password.")).toBeVisible()
 })

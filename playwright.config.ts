@@ -8,6 +8,10 @@ for (const file of [".env.local", ".env"]) {
 }
 
 const PORT = Number(process.env.PORT ?? 3000)
+// A client IP per worker (198.18.0.0/15 is reserved for testing), so the app's
+// per-IP auth rate limits don't carry over between runs. Specs that sign in
+// also give each test its own (e2e/support/client-ip.ts).
+const workerClientIp = `198.19.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}`
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://localhost:${PORT}`
 const isCI = Boolean(process.env.CI)
 
@@ -36,6 +40,7 @@ export default defineConfig({
   use: {
     baseURL,
     trace: "on-first-retry",
+    extraHTTPHeaders: { "x-forwarded-for": workerClientIp },
     screenshot: "only-on-failure",
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],

@@ -2,10 +2,13 @@ import type { Metadata } from "next"
 import { CopyField } from "@/components/forms/copy-field"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { WorkspaceProfileForm } from "@/features/workspaces/components/workspace-profile-form"
 import { WorkspaceSettingsForm } from "@/features/workspaces/components/workspace-settings-form"
 import { canManageWorkspace } from "@/features/workspaces/lib/access"
 import { WORKSPACE_ROLE_LABELS } from "@/features/workspaces/lib/roles"
-import { requireWorkspaceMember } from "@/features/workspaces/server/queries"
+import { getWorkspaceProfile, requireWorkspaceMember } from "@/features/workspaces/server/queries"
+import { countryOptions } from "@/lib/countries"
+import { timezoneOptions } from "@/lib/timezones"
 
 export const metadata: Metadata = { title: "Workspace settings" }
 
@@ -16,6 +19,8 @@ export default async function WorkspaceSettingsPage({
 }: PageProps<"/w/[workspaceSlug]/settings">) {
   const { workspaceSlug } = await params
   const workspace = await requireWorkspaceMember(workspaceSlug)
+  const profile = await getWorkspaceProfile(workspace.id)
+  const canManage = canManageWorkspace(workspace.role)
 
   return (
     <div className="grid gap-6">
@@ -31,7 +36,29 @@ export default async function WorkspaceSettingsPage({
             // Remount with fresh values if the workspace is renamed elsewhere.
             key={`${workspace.id}:${workspace.name}:${workspace.slug}`}
             workspace={workspace}
-            canManage={canManageWorkspace(workspace.role)}
+            canManage={canManage}
+          />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>
+            <h2>Business profile</h2>
+          </CardTitle>
+          <CardDescription>
+            How your business appears to customers in messages, booking pages and websites.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <WorkspaceProfileForm
+            key={workspace.id}
+            workspaceId={workspace.id}
+            workspaceName={workspace.name}
+            profile={profile}
+            canManage={canManage}
+            timezoneOptions={timezoneOptions()}
+            countryOptions={countryOptions()}
           />
         </CardContent>
       </Card>

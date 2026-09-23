@@ -1,10 +1,10 @@
 import type { NextConfig } from "next"
-import { parsePublicEnv, parseServerEnv } from "./src/lib/env/schema"
+import { parseDeploymentEnv } from "./src/lib/env/schema"
 
 // Fail the build (and `next dev` startup) on missing/invalid configuration
-// instead of at the first request in production.
-parsePublicEnv(process.env)
-parseServerEnv(process.env)
+// instead of at the first request in production. Staging and production
+// builds also fail without the CAPTCHA, rate-limit and https settings.
+parseDeploymentEnv(process.env)
 
 const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },

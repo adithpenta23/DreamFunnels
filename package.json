@@ -26,7 +26,8 @@
     "db:stop": "supabase stop",
     "db:reset": "supabase db reset",
     "db:migration:new": "supabase migration new",
-    "db:types": "supabase gen types typescript --local --schema public > src/types/database.types.ts && prettier --write src/types/database.types.ts"
+    "db:types": "supabase gen types typescript --local --schema public > src/types/database.types.ts && prettier --write src/types/database.types.ts",
+    "verify:hosted": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/verify-hosted-auth.mts"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

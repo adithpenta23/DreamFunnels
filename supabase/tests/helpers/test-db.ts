@@ -60,22 +60,43 @@ export type TestDb = {
   asUser: <T>(userId: string, fn: (tx: Tx) => Promise<T>) => Promise<T>
   /** Runs `fn` as the anonymous role (RLS enforced). */
   asAnon: <T>(fn: (tx: Tx) => Promise<T>) => Promise<T>
+  /** Runs `fn` as service_role (the secret key: bypasses RLS). */
+  asServiceRole: <T>(fn: (tx: Tx) => Promise<T>) => Promise<T>
+  /** Applies the migrations held back by `stopBefore` (no-op otherwise). */
+  applyRemainingMigrations: () => Promise<void>
   close: () => Promise<void>
 }
 
-export async function createTestDb(): Promise<TestDb> {
+type TestDbOptions = {
+  /**
+   * Apply only the migrations whose file name sorts before this one, so a
+   * test can create data in the old shape and then check how a new migration
+   * treats it (call applyRemainingMigrations()).
+   */
+  stopBefore?: string
+}
+
+export async function createTestDb({ stopBefore }: TestDbOptions = {}): Promise<TestDb> {
   const admin = await PGlite.create()
   await admin.exec(SUPABASE_PLATFORM_SHIM)
 
   const migrations = readdirSync(MIGRATIONS_DIR)
     .filter((file) => file.endsWith(".sql"))
     .sort()
-  for (const file of migrations) {
-    await admin.exec(readFileSync(path.join(MIGRATIONS_DIR, file), "utf8"))
+  if (stopBefore && !migrations.includes(stopBefore)) {
+    throw new Error(`Unknown migration: ${stopBefore}`)
   }
+  const cut = stopBefore ? migrations.indexOf(stopBefore) : migrations.length
+  const apply = async (files: string[]) => {
+    for (const file of files) {
+      await admin.exec(readFileSync(path.join(MIGRATIONS_DIR, file), "utf8"))
+    }
+  }
+  await apply(migrations.slice(0, cut))
+  let remaining = migrations.slice(cut)
 
   const runAs = <T>(
-    role: "anon" | "authenticated",
+    role: "anon" | "authenticated" | "service_role",
     claims: Record<string, unknown>,
     fn: (tx: Tx) => Promise<T>
   ) =>
@@ -101,6 +122,12 @@ export async function createTestDb(): Promise<TestDb> {
     },
     asUser: (userId, fn) => runAs("authenticated", { sub: userId, role: "authenticated" }, fn),
     asAnon: (fn) => runAs("anon", { role: "anon" }, fn),
+    asServiceRole: (fn) => runAs("service_role", { role: "service_role" }, fn),
+    async applyRemainingMigrations() {
+      const pending = remaining
+      remaining = []
+      await apply(pending)
+    },
     close: () => admin.close(),
   }
 }
