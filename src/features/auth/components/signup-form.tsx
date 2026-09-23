@@ -6,6 +6,7 @@ import { useActionState, useState, useTransition } from "react"
 import { FormError, FormField } from "@/components/forms/form-field"
 import { PasswordInput } from "@/components/forms/password-input"
 import { SubmitButton } from "@/components/forms/submit-button"
+import { captchaSiteKey, TurnstileWidget } from "@/components/forms/turnstile-widget"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { toast } from "@/components/ui/toast"
@@ -21,6 +22,9 @@ export function SignupForm() {
     return result
   }, null)
   const [email, setEmail] = useState("")
+  // Hosted environments require the CAPTCHA; hold the button until it's solved.
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null)
+  const waitingForCaptcha = captchaSiteKey() !== null && !captchaToken
 
   if (state?.ok) return <CheckYourEmail email={state.data.email} />
 
@@ -49,8 +53,14 @@ export function SignupForm() {
       >
         <PasswordInput name="password" autoComplete="new-password" required />
       </FormField>
+      <TurnstileWidget action="signup" onTokenChange={setCaptchaToken} resetKey={state} />
       <FormError message={formError} />
-      <SubmitButton className="w-full" size="lg" pendingLabel="Creating your account…">
+      <SubmitButton
+        className="w-full"
+        size="lg"
+        pendingLabel="Creating your account…"
+        disabled={waitingForCaptcha}
+      >
         Create account
       </SubmitButton>
     </form>

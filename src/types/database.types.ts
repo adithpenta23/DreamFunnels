@@ -10,6 +10,9 @@ export type Database = {
           email: string | null
           full_name: string | null
           id: string
+          locale: string
+          phone: string | null
+          timezone: string
           updated_at: string
         }
         Insert: {
@@ -18,6 +21,9 @@ export type Database = {
           email?: string | null
           full_name?: string | null
           id: string
+          locale?: string
+          phone?: string | null
+          timezone?: string
           updated_at?: string
         }
         Update: {
@@ -26,6 +32,9 @@ export type Database = {
           email?: string | null
           full_name?: string | null
           id?: string
+          locale?: string
+          phone?: string | null
+          timezone?: string
           updated_at?: string
         }
         Relationships: []
@@ -71,28 +80,77 @@ export type Database = {
       }
       workspaces: {
         Row: {
+          address_city: string | null
+          address_country: string | null
+          address_line1: string | null
+          address_line2: string | null
+          address_postal_code: string | null
+          address_region: string | null
+          brand_primary_color: string | null
+          brand_secondary_color: string | null
+          business_email: string | null
+          business_name: string | null
+          business_phone: string | null
           created_at: string
           created_by: string | null
           id: string
+          logo_url: string | null
           name: string
+          parent_workspace_id: string | null
+          parent_workspace_type: Database["public"]["Enums"]["workspace_type"] | null
           slug: string
+          timezone: string
           updated_at: string
+          workspace_type: Database["public"]["Enums"]["workspace_type"]
+          viewer_role: Database["public"]["Enums"]["workspace_role"] | null
         }
         Insert: {
+          address_city?: string | null
+          address_country?: string | null
+          address_line1?: string | null
+          address_line2?: string | null
+          address_postal_code?: string | null
+          address_region?: string | null
+          brand_primary_color?: string | null
+          brand_secondary_color?: string | null
+          business_email?: string | null
+          business_name?: string | null
+          business_phone?: string | null
           created_at?: string
           created_by?: string | null
           id?: string
+          logo_url?: string | null
           name: string
+          parent_workspace_id?: string | null
+          parent_workspace_type?: Database["public"]["Enums"]["workspace_type"] | null
           slug: string
+          timezone?: string
           updated_at?: string
+          workspace_type?: Database["public"]["Enums"]["workspace_type"]
         }
         Update: {
+          address_city?: string | null
+          address_country?: string | null
+          address_line1?: string | null
+          address_line2?: string | null
+          address_postal_code?: string | null
+          address_region?: string | null
+          brand_primary_color?: string | null
+          brand_secondary_color?: string | null
+          business_email?: string | null
+          business_name?: string | null
+          business_phone?: string | null
           created_at?: string
           created_by?: string | null
           id?: string
+          logo_url?: string | null
           name?: string
+          parent_workspace_id?: string | null
+          parent_workspace_type?: Database["public"]["Enums"]["workspace_type"] | null
           slug?: string
+          timezone?: string
           updated_at?: string
+          workspace_type?: Database["public"]["Enums"]["workspace_type"]
         }
         Relationships: [
           {
@@ -102,6 +160,13 @@ export type Database = {
             referencedRelation: "profiles"
             referencedColumns: ["id"]
           },
+          {
+            foreignKeyName: "workspaces_parent_fkey"
+            columns: ["parent_workspace_id", "parent_workspace_type"]
+            isOneToOne: false
+            referencedRelation: "workspaces"
+            referencedColumns: ["id", "workspace_type"]
+          },
         ]
       }
     }
@@ -110,14 +175,30 @@ export type Database = {
     }
     Functions: {
       create_workspace: {
-        Args: { p_name: string; p_slug?: string }
+        Args: { p_name: string; p_slug?: string; p_timezone?: string }
         Returns: {
+          address_city: string | null
+          address_country: string | null
+          address_line1: string | null
+          address_line2: string | null
+          address_postal_code: string | null
+          address_region: string | null
+          brand_primary_color: string | null
+          brand_secondary_color: string | null
+          business_email: string | null
+          business_name: string | null
+          business_phone: string | null
           created_at: string
           created_by: string | null
           id: string
+          logo_url: string | null
           name: string
+          parent_workspace_id: string | null
+          parent_workspace_type: Database["public"]["Enums"]["workspace_type"] | null
           slug: string
+          timezone: string
           updated_at: string
+          workspace_type: Database["public"]["Enums"]["workspace_type"]
         }
         SetofOptions: {
           from: "*"
@@ -126,9 +207,23 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      rate_limit_hit: {
+        Args: { p_key: string; p_window_seconds: number }
+        Returns: {
+          hits: number
+          window_ends_at: string
+        }[]
+      }
+      viewer_role: {
+        Args: { "": Database["public"]["Tables"]["workspaces"]["Row"] }
+        Returns: {
+          error: true
+        } & "the function public.viewer_role with parameter or with a single unnamed json/jsonb parameter, but no matches were found in the schema cache"
+      }
     }
     Enums: {
       workspace_role: "member" | "admin" | "owner"
+      workspace_type: "agency" | "client"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -251,6 +346,7 @@ export const Constants = {
   public: {
     Enums: {
       workspace_role: ["member", "admin", "owner"],
+      workspace_type: ["agency", "client"],
     },
   },
 } as const

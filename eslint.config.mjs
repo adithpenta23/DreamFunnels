@@ -41,6 +41,7 @@ export default defineConfig([
       "src/lib/supabase/admin.ts",
       "e2e/**",
       "supabase/tests/**",
+      "scripts/**",
       "*.config.{ts,mts,mjs}",
     ],
     rules: {

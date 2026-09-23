@@ -1,6 +1,7 @@
 "use client"
 
 import { useActionState, useState } from "react"
+import { BrowserHints } from "@/components/forms/browser-hints"
 import { FormError, FormField } from "@/components/forms/form-field"
 import { SubmitButton } from "@/components/forms/submit-button"
 import { Input } from "@/components/ui/input"
@@ -16,6 +17,7 @@ export function OnboardingForm({ defaultFullName }: { defaultFullName: string })
 
   return (
     <form action={formAction} className="grid gap-5" noValidate>
+      <BrowserHints />
       <FormField id="fullName" label="Your name" error={fieldErrors?.fullName}>
         <Input
           name="fullName"

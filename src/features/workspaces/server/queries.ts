@@ -10,18 +10,20 @@ import { authorizeWorkspaceAccess, pickDefaultWorkspace } from "../lib/access"
 import { LAST_WORKSPACE_COOKIE, parseLastWorkspace } from "../lib/last-workspace"
 import type { WorkspaceRole } from "../lib/roles"
 import { WORKSPACE_SLUG_PATTERN } from "../lib/slug"
-import type { WorkspaceSummary } from "../types"
+import type { WorkspaceProfile, WorkspaceSummary } from "../types"
 
 /**
  * Workspace data access. Every function authenticates first and queries with
- * the user's own Supabase client, so RLS is the final word on what is visible.
- * The explicit `user_id` filters narrow results to the caller's membership row;
- * they are not what provides isolation.
+ * the user's own Supabase client, so RLS is the final word on what is visible:
+ * the workspaces a user belongs to, plus (for agency owners and admins) their
+ * agency's client workspaces.
  */
 
-export type { WorkspaceSummary }
+export type { WorkspaceProfile, WorkspaceSummary }
 
-const WORKSPACE_WITH_ROLE = "id, name, slug, created_at, workspace_members!inner(role)" as const
+// `viewer_role` is a computed field (public.viewer_role): the caller's
+// effective role, direct or inherited from the parent agency.
+const WORKSPACE_SUMMARY = "id, name, slug, created_at, viewer_role" as const
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 type WorkspaceRow = {
@@ -29,17 +31,16 @@ type WorkspaceRow = {
   name: string
   slug: string
   created_at: string
-  workspace_members: { role: WorkspaceRole }[]
+  viewer_role: WorkspaceRole | null
 }
 
 function toSummary(row: WorkspaceRow | null): WorkspaceSummary | null {
-  const membership = row?.workspace_members[0]
-  if (!row || !membership) return null
+  if (!row?.viewer_role) return null
   return {
     id: row.id,
     name: row.name,
     slug: row.slug,
-    role: membership.role,
+    role: row.viewer_role,
     createdAt: row.created_at,
   }
 }
@@ -51,32 +52,30 @@ function loadFailed(what: string, error: { code: string }) {
   })
 }
 
-/** The caller's workspaces, oldest first. Empty means onboarding hasn't happened. */
+/** Every workspace the caller can open, oldest first. Empty means onboarding hasn't happened. */
 export const listMyWorkspaces = cache(async (): Promise<WorkspaceSummary[]> => {
-  const user = await requireUser()
+  await requireUser()
   const supabase = await createClient()
 
   const { data, error } = await supabase
     .from("workspaces")
-    .select(WORKSPACE_WITH_ROLE)
-    .eq("workspace_members.user_id", user.id)
+    .select(WORKSPACE_SUMMARY)
     .order("created_at", { ascending: true })
 
   if (error) throw loadFailed("workspaces", error)
   return data.flatMap((row) => toSummary(row) ?? [])
 })
 
-/** The workspace with the caller's role, or null if it doesn't exist or they aren't a member. */
+/** The workspace with the caller's role, or null if it doesn't exist or they have no access. */
 export const getWorkspaceBySlug = cache(async (slug: string): Promise<WorkspaceSummary | null> => {
   if (!WORKSPACE_SLUG_PATTERN.test(slug)) return null
 
-  const user = await requireUser()
+  await requireUser()
   const supabase = await createClient()
   const { data, error } = await supabase
     .from("workspaces")
-    .select(WORKSPACE_WITH_ROLE)
+    .select(WORKSPACE_SUMMARY)
     .eq("slug", slug)
-    .eq("workspace_members.user_id", user.id)
     .maybeSingle()
 
   if (error) throw loadFailed("workspace", error)
@@ -87,13 +86,12 @@ export const getWorkspaceBySlug = cache(async (slug: string): Promise<WorkspaceS
 export const getWorkspaceById = cache(async (id: string): Promise<WorkspaceSummary | null> => {
   if (!UUID_PATTERN.test(id)) return null
 
-  const user = await requireUser()
+  await requireUser()
   const supabase = await createClient()
   const { data, error } = await supabase
     .from("workspaces")
-    .select(WORKSPACE_WITH_ROLE)
+    .select(WORKSPACE_SUMMARY)
     .eq("id", id)
-    .eq("workspace_members.user_id", user.id)
     .maybeSingle()
 
   if (error) throw loadFailed("workspace", error)
@@ -101,8 +99,45 @@ export const getWorkspaceById = cache(async (id: string): Promise<WorkspaceSumma
 })
 
 /**
- * Gate for every workspace-scoped page and layout. Non-members get a 404
- * (not a 403) so workspace existence is never leaked.
+ * The business profile of a workspace the caller can see. Call it after
+ * requireWorkspaceMember(); RLS hides other tenants' rows regardless.
+ */
+export const getWorkspaceProfile = cache(async (workspaceId: string): Promise<WorkspaceProfile> => {
+  await requireUser()
+  const supabase = await createClient()
+  const { data, error } = await supabase
+    .from("workspaces")
+    .select(
+      "timezone, business_name, business_email, business_phone, address_line1, address_line2, address_city, address_region, address_postal_code, address_country, logo_url, brand_primary_color, brand_secondary_color"
+    )
+    .eq("id", workspaceId)
+    .maybeSingle()
+
+  if (error) throw loadFailed("workspace profile", error)
+  if (!data) {
+    throw new AppError("NOT_FOUND", "Workspace not found", { context: { workspaceId } })
+  }
+  return {
+    timezone: data.timezone,
+    businessName: data.business_name,
+    businessEmail: data.business_email,
+    businessPhone: data.business_phone,
+    addressLine1: data.address_line1,
+    addressLine2: data.address_line2,
+    addressCity: data.address_city,
+    addressRegion: data.address_region,
+    addressPostalCode: data.address_postal_code,
+    addressCountry: data.address_country,
+    logoUrl: data.logo_url,
+    brandPrimaryColor: data.brand_primary_color,
+    brandSecondaryColor: data.brand_secondary_color,
+  }
+})
+
+/**
+ * Gate for every workspace-scoped page and layout. Callers without access get
+ * a 404 (not a 403) so workspace existence is never leaked. "Access" is
+ * membership, or agency owner/admin of the workspace's parent agency.
  */
 export async function requireWorkspaceMember(
   slug: string,
@@ -122,7 +157,7 @@ export async function requireWorkspaceMember(
 /**
  * Gate for Server Actions that act on a workspace id taken from a form.
  * Throws AppErrors (not notFound) so the form can show the failure. Never
- * trust the id itself: this re-reads the membership through RLS.
+ * trust the id itself: this re-reads access through RLS.
  */
 export async function requireWorkspaceAccess(
   workspaceId: string,

@@ -5,6 +5,7 @@ import Link from "next/link"
 import { useActionState, useState } from "react"
 import { FormError, FormField } from "@/components/forms/form-field"
 import { SubmitButton } from "@/components/forms/submit-button"
+import { captchaSiteKey, TurnstileWidget } from "@/components/forms/turnstile-widget"
 import { buttonVariants } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { routes } from "@/config/routes"
@@ -21,6 +22,8 @@ export function ForgotPasswordForm() {
     null
   )
   const [email, setEmail] = useState("")
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null)
+  const waitingForCaptcha = captchaSiteKey() !== null && !captchaToken
 
   if (state?.ok) {
     return (
@@ -59,8 +62,14 @@ export function ForgotPasswordForm() {
           autoFocus
         />
       </FormField>
+      <TurnstileWidget action="password_reset" onTokenChange={setCaptchaToken} resetKey={state} />
       <FormError message={formError} />
-      <SubmitButton className="w-full" size="lg" pendingLabel="Sending link…">
+      <SubmitButton
+        className="w-full"
+        size="lg"
+        pendingLabel="Sending link…"
+        disabled={waitingForCaptcha}
+      >
         Send reset link
       </SubmitButton>
     </form>

@@ -5,14 +5,14 @@ tenant isolation proven by tests rather than assumed.
 
 ## Test pyramid
 
-| Level          | Tool                                           | Location                             | Runs                | What belongs here                                                                             |
-| -------------- | ---------------------------------------------- | ------------------------------------ | ------------------- | --------------------------------------------------------------------------------------------- |
-| Static         | TypeScript strict, ESLint, Prettier            | whole repo                           | every commit        | Types, unsafe patterns (raw Supabase clients, `console`), formatting.                         |
-| Unit           | Vitest (`unit`, node)                          | `src/**/*.test.ts`, next to the code | every commit, ~1s   | Pure logic: schemas, guards, redirects, routing decisions, error mapping, slugs, role rules.  |
-| Component      | Vitest (`components`, jsdom) + Testing Library | `src/**/*.test.tsx`                  | every commit        | Client components' behaviour and accessibility (roles and labels, not CSS).                   |
-| Database / RLS | Vitest (`db`) + PGlite                         | `supabase/tests/**/*.test.ts`        | every commit, ~2s   | Real migrations and real policies under real roles: isolation, grants, triggers, constraints. |
-| E2E smoke      | Playwright (Chromium)                          | `e2e/smoke.spec.ts`                  | every run           | Public surface, guards, validation and error paths. **Needs no Supabase.**                    |
-| E2E flows      | Playwright (Chromium) + local Supabase         | `e2e/auth.spec.ts`                   | CI; local w/ Docker | Signed-in journeys through real Auth, PostgREST and RLS: signup → onboarding → dashboard → …  |
+| Level          | Tool                                           | Location                                 | Runs                | What belongs here                                                                             |
+| -------------- | ---------------------------------------------- | ---------------------------------------- | ------------------- | --------------------------------------------------------------------------------------------- |
+| Static         | TypeScript strict, ESLint, Prettier            | whole repo                               | every commit        | Types, unsafe patterns (raw Supabase clients, `console`), formatting.                         |
+| Unit           | Vitest (`unit`, node)                          | `src/**/*.test.ts`, `scripts/**`         | every commit, ~1s   | Pure logic: schemas, guards, redirects, error mapping, slugs, roles, rate limits, time zones. |
+| Component      | Vitest (`components`, jsdom) + Testing Library | `src/**/*.test.tsx`                      | every commit        | Client components' behaviour and accessibility (roles and labels, not CSS).                   |
+| Database / RLS | Vitest (`db`) + PGlite                         | `supabase/tests/**/*.test.ts`            | every commit, ~2s   | Real migrations and real policies under real roles: isolation, grants, triggers, constraints. |
+| E2E smoke      | Playwright (Chromium)                          | `e2e/smoke.spec.ts`                      | every run           | Public surface, guards, validation and error paths. **Needs no Supabase.**                    |
+| E2E flows      | Playwright (Chromium) + local Supabase         | `e2e/auth.spec.ts`, `workspaces.spec.ts` | CI; local w/ Docker | Signed-in journeys through real Auth, PostgREST and RLS: signup → onboarding → dashboard → …  |
 
 Guidelines:
 
@@ -24,13 +24,23 @@ Guidelines:
   Supabase to "test" authorization; that belongs in the RLS suite or E2E.
 - No network in unit, component or db tests. Vitest sets non-secret placeholder `NEXT_PUBLIC_*`
   values (`vitest.config.mts`) so modules that read the public env contract can be imported.
+  External services are faked at their boundary: Turnstile's `siteverify` is a stub `fetch`, the
+  Turnstile widget a stub `window.turnstile`, the rate-limit store an in-memory store.
 
 ## Tenant-isolation tests (mandatory)
 
-`supabase/tests/tenancy-rls.test.ts` boots PGlite (Postgres 17 in WASM), installs a thin shim of
+The suites in `supabase/tests/` boot PGlite (Postgres 17 in WASM), install a thin shim of
 Supabase's platform (roles `anon`/`authenticated`/`service_role`/`supabase_auth_admin`,
-`auth.users`, `auth.uid()`, default grants), applies **every migration in order**, and runs
-queries as real roles with real JWT claims.
+`auth.users`, `auth.uid()`, default grants), apply **every migration in order**, and run queries
+as real roles with real JWT claims. `createTestDb({ stopBefore })` stops before a given migration,
+so a test can create data in the old shape and check how the new migration treats it.
+
+| Suite                      | Covers                                                                                                                                     |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `tenancy-rls.test.ts`      | Sprint 0–1: signup, workspace creation, isolation, roles, last owner, profiles.                                                            |
+| `agency-hierarchy.test.ts` | Sprint 2: agency → client access for every role, write policies, no re-parenting, hierarchy constraints, migration of existing workspaces. |
+| `profile-fields.test.ts`   | Sprint 2: time zone validation, business profile constraints and permissions, profile preferences.                                         |
+| `rate-limits.test.ts`      | Sprint 2: fixed-window counting, window reset, input checks, no access for anon/authenticated.                                             |
 
 **Every migration that adds or changes a tenant-owned table must add tests proving:**
 
@@ -42,8 +52,14 @@ queries as real roles with real JWT claims.
 
 The suite is mutation-checked: loosening a policy, dropping the owner-only guard or the
 last-owner trigger (Sprint 0), and dropping the reserved-slug constraint, disabling the slug
-collision retry or the accent folding (Sprint 1) each made specific tests fail. Keep that
-property: a new rule isn't tested until a test fails when the rule is broken.
+collision retry or the accent folding (Sprint 1) each made specific tests fail. Sprint 2 repeated
+this for 14 mutations, each caught by at least one test: agency members inheriting access,
+client members reaching their parent, agency members getting an inherited role, the
+hierarchy columns granted to users, the hierarchy CHECK dropped, no inherited role at all, the
+parent key cascading deletes, offsets or `Etc/` zones accepted as time zones, the limiter RPC or
+its table opened to users, windows that never reset, a role check that ignores the minimum role,
+and a widened profile grant. Keep that property: a new rule isn't tested until a test fails when
+the rule is broken.
 
 PGlite limits: it doesn't emulate PostgREST, GoTrue, JWT verification or Storage. Behaviour
 that depends on those is covered by `e2e/auth.spec.ts` against a real local Supabase.
@@ -63,6 +79,21 @@ that depends on those is covered by `e2e/auth.spec.ts` against a real local Supa
 | Shell, switcher, settings forms, app context  | `components/layout/app-shell.test.tsx`, `workspace-switcher.test.tsx`, `workspace-settings-form.test.tsx`, `app-context.test.tsx` |
 | Full journey (9 steps) + cross-tenant 404     | `e2e/auth.spec.ts` "a new user signs up, onboards, and keeps the right workspace across sessions"                                 |
 | Settings, second workspace, reset, tampering  | `e2e/auth.spec.ts` (remaining tests)                                                                                              |
+
+## Sprint 2 coverage map
+
+| Requirement                                         | Where it's tested                                                                                                       |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Agency/client access rules (12 required scenarios)  | `supabase/tests/agency-hierarchy.test.ts` (numbered 1–12); E2E `workspaces.spec.ts` "agency owners reach their clients" |
+| Hierarchy invariants, delete behaviour, migration   | `agency-hierarchy.test.ts` "11." and "12."; the migration also ran against the existing local database                  |
+| Time zones (IANA only, canonical, labels, DST)      | `lib/timezones.test.ts`, `profile-fields.test.ts`, E2E (picker, Denver browser seeds Mountain Time)                     |
+| Business profile (validation, normalising, roles)   | `workspaces/schemas` via the form + `profile-fields.test.ts`, `workspace-profile-form.test.tsx`, E2E                    |
+| Profile phone, time zone, locale                    | `account/schemas.test.ts`, `profile-fields.test.ts`, E2E                                                                |
+| Rate limiting (core, stores, IPs, auth wiring)      | `lib/rate-limit/core.test.ts`, `lib/request-ip.test.ts`, `rate-limits.test.ts`, E2E "sign-in attempts are rate-limited" |
+| CAPTCHA (verification, widget, form gating)         | `lib/captcha/turnstile.test.ts`, `turnstile-widget.test.tsx`, `signup-form.test.tsx`                                    |
+| Environment rules (APP_ENV, hosted requirements)    | `lib/env/schema.test.ts`; `APP_ENV=staging next build` fails listing the missing settings                               |
+| Hosted Auth checks (confirmation, JWT signing keys) | `scripts/verify-hosted-auth.test.ts`; run against the local stack (reports confirmation off, EC key present)            |
+| Searchable select (search, keyboard, clear)         | `components/forms/searchable-select.test.tsx`, E2E                                                                      |
 
 ## Running the suites
 
@@ -87,6 +118,13 @@ email sent) and delete its test users afterwards; without it the reset test is s
 Test users are `e2e-<label>-<id>@example.com` with random ids, so runs don't collide and can run in
 parallel. The local stack allows more sign-ins per IP than hosted defaults (`config.toml`), because
 every Auth call comes from the Next server's IP.
+
+The app's own auth rate limits are per client IP, so each browser context sends a random
+`X-Forwarded-For` from 198.18.0.0/15 (per worker in `playwright.config.ts`, per test via
+`giveEachTestItsOwnIp()`): tests and repeated local runs don't spend each other's budget, and the
+rate-limit test gets a clean one. `next dev`/`next start` keep a client-supplied header; Vercel
+overwrites it, so runs against a preview deployment share the runner's real IP and its limits.
+The CAPTCHA is off in E2E (no Turnstile keys), so no test depends on Cloudflare.
 
 ## Quality gates
 
@@ -134,6 +172,15 @@ no direct pushes.
 - Open another user's workspace URL: "Workspace not found", with no data leaked.
 - Check the mobile viewport: navigation sheet (switcher + modules) opens and closes, no horizontal
   scroll. Check keyboard-only use: skip link, focus rings, menus, password visibility toggle.
+- Business profile (as owner/admin): search the time zone picker by city ("chicago"), by IANA id
+  ("america/") and with the keyboard only (type, arrows, Enter, Escape); save a phone typed as
+  "(512) 555-0100" without a country code (rejected on the field) and "+1 512 555 0100" (saved as
+  +15125550100); pick colours with the swatch and by typing; clear the country; reload and see
+  everything kept. As a member, the section is read-only. Check the mobile layout.
+- Staging only: sign-up and forgot-password show the Turnstile widget, the button waits for it,
+  and a sign-up with the widget blocked by an extension fails with the generic message. Eleven
+  wrong passwords for one email within 15 minutes end in "Too many attempts".
+- Staging and production: `npm run verify:hosted` passes (the deploy-database workflow runs it).
 
 ## Flaky test policy
 
@@ -144,12 +191,14 @@ traces, not to excuse flakiness.
 ## Next steps for QA (backlog)
 
 1. E2E for the email-confirmation path with confirmation enabled, reading the link from the local
-   Mailpit API.
+   Mailpit API (the path staging and production use).
 2. `supabase db lint` in CI to catch Supabase-specific schema issues PGlite can't see.
 3. A CI check that `npm run db:types` produces no diff, so migrations and types can't drift.
 4. Coverage reporting (`@vitest/coverage-v8`) with a floor on `src/lib` and `src/features/**/server`.
 5. Accessibility checks (`@axe-core/playwright`) on the auth pages, onboarding and settings.
 6. Preview-deployment smoke: run `PLAYWRIGHT_BASE_URL=<vercel preview url> npm run test:e2e`.
+7. Staging E2E with Cloudflare's always-pass Turnstile keys, to exercise the real widget and
+   `siteverify` path end to end.
 
 ## Stack notes for E2E
 
@@ -161,3 +210,10 @@ traces, not to excuse flakiness.
   and sign-ups hash passwords in the Auth container. CI uses 1 worker on a production build.
 - Menus are opened with a retrying helper (`e2e/support/flows.ts#openMenu`) because a click can
   land before a cold page hydrates.
+- Component tests open the searchable select with ArrowDown: jsdom's synthetic typing doesn't open
+  Base UI's Combobox (real keyboards do; E2E types into it). While it's open, Base UI hides the rest
+  of the page from assistive tech, so keep a reference to the input rather than re-querying it by
+  role.
+- A test that submits the same form repeatedly must wait for each action to settle (e.g. the
+  password field being cleared) before typing again, or the pending action's form reset can wipe
+  the next attempt's input.

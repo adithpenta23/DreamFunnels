@@ -4,6 +4,7 @@ import { ProfileForm } from "@/features/account/components/profile-form"
 import { getCurrentProfile } from "@/features/account/server/profile"
 import { ChangePasswordForm } from "@/features/auth/components/change-password-form"
 import { requireWorkspaceMember } from "@/features/workspaces/server/queries"
+import { timezoneOptions } from "@/lib/timezones"
 
 export const metadata: Metadata = { title: "Account settings" }
 
@@ -24,14 +25,12 @@ export default async function AccountSettingsPage({
           <CardTitle>
             <h2>Profile</h2>
           </CardTitle>
-          <CardDescription>How you appear to people in your workspaces.</CardDescription>
+          <CardDescription>
+            How you appear to people in your workspaces, and how we reach you.
+          </CardDescription>
         </CardHeader>
         <CardContent>
-          <ProfileForm
-            key={profile.fullName ?? ""}
-            fullName={profile.fullName}
-            email={profile.email}
-          />
+          <ProfileForm key={profile.id} profile={profile} timezoneOptions={timezoneOptions()} />
         </CardContent>
       </Card>
 

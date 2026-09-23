@@ -29,6 +29,18 @@ describe("toWorkspaceWriteError", () => {
     expect(error.fieldErrors?.[field]?.[0]).toMatch(message)
   })
 
+  it.each([
+    ["workspaces_timezone_check", "timezone"],
+    ["workspaces_business_phone_check", "businessPhone"],
+    ["workspaces_address_country_check", "addressCountry"],
+    ["workspaces_logo_url_check", "logoUrl"],
+    ["workspaces_brand_secondary_color_check", "brandSecondaryColor"],
+  ])("maps the business profile constraint %s to the %s field", (constraint, field) => {
+    const error = toWorkspaceWriteError(check(constraint))
+    expect(error.code).toBe("VALIDATION")
+    expect(error.fieldErrors?.[field]).toHaveLength(1)
+  })
+
   it("treats anything else as an unexpected failure, logging only code and constraint", () => {
     const error = toWorkspaceWriteError({ code: "42501", message: "permission denied" })
     expect(error.code).toBe("INTERNAL")

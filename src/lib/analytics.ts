@@ -18,6 +18,7 @@ export type AnalyticsEvents = {
   password_changed: { via: "settings" | "reset_link" }
   profile_updated: Record<string, never>
   workspace_updated: { slugChanged: boolean }
+  workspace_profile_updated: Record<string, never>
 }
 
 export type AnalyticsEventName = keyof AnalyticsEvents
