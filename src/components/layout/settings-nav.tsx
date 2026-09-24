@@ -6,10 +6,11 @@ import { usePathname } from "next/navigation"
 import { routes } from "@/config/routes"
 import { cn } from "@/lib/utils"
 
-/** Settings sections. Members, billing and domains will be added here. */
+/** Settings sections. Billing and domains will be added here. */
 function sectionsFor(workspaceSlug: string): { label: string; href: Route }[] {
   return [
     { label: "General", href: routes.workspaceSettings(workspaceSlug) },
+    { label: "Members", href: routes.workspaceMembers(workspaceSlug) },
     { label: "Account", href: routes.accountSettings(workspaceSlug) },
   ]
 }

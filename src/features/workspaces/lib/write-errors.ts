@@ -30,6 +30,12 @@ export function toWorkspaceWriteError(error: DbErrorLike): AppError {
       )
     case "workspaces_name_check":
       return invalid("VALIDATION", "workspaceName", "Enter a name of 1–80 characters.")
+    case "workspaces_client_name_key":
+      return invalid(
+        "CONFLICT",
+        "workspaceName",
+        "You already have a client with this name. Use a different workspace name."
+      )
   }
 
   // Business profile: the form validates the same rules first, so reaching
@@ -47,6 +53,7 @@ const PROFILE_CONSTRAINT_FIELDS: Readonly<Record<string, string>> = {
   workspaces_business_name_check: "businessName",
   workspaces_business_email_check: "businessEmail",
   workspaces_business_phone_check: "businessPhone",
+  workspaces_website_url_check: "websiteUrl",
   workspaces_address_line1_check: "addressLine1",
   workspaces_address_line2_check: "addressLine2",
   workspaces_address_city_check: "addressCity",

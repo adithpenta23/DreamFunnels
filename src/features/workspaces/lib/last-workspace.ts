@@ -3,7 +3,7 @@ import { WORKSPACE_SLUG_PATTERN } from "./slug"
 /**
  * "Which workspace did this user open last on this device?", so sign-in can
  * reopen it. A preference, not an authorization input: the slug is only used
- * after checking the user is still a member (see pickDefaultWorkspace).
+ * after checking the user can still open it (see resolveDefaultWorkspace).
  *
  * The value is `<userId>:<slug>`, so on a shared browser one person's choice
  * is never applied to another. It's written by the workspace layout on the

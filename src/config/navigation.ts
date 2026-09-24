@@ -1,4 +1,5 @@
 import {
+  Building2Icon,
   ChartColumnIcon,
   CreditCardIcon,
   FunnelIcon,
@@ -11,6 +12,8 @@ import {
   type LucideIcon,
 } from "lucide-react"
 import type { Route } from "next"
+import { canManageClients } from "@/features/workspaces/lib/members"
+import type { WorkspaceSummary } from "@/features/workspaces/types"
 import { routes } from "./routes"
 
 /**
@@ -28,6 +31,11 @@ export type WorkspaceNavItem = {
   href?: (workspaceSlug: string) => Route
   /** "exact" for the workspace home, which every other path starts with. */
   match?: "exact" | "prefix"
+  /**
+   * Hides the entry where it doesn't apply (cosmetic: the page checks access
+   * itself). Shown everywhere when absent.
+   */
+  visible?: (workspace: Pick<WorkspaceSummary, "type" | "role">) => boolean
 }
 
 export const WORKSPACE_NAV: readonly WorkspaceNavItem[] = [
@@ -38,6 +46,15 @@ export const WORKSPACE_NAV: readonly WorkspaceNavItem[] = [
     description: "Your workspace at a glance.",
     href: routes.workspace,
     match: "exact",
+  },
+  {
+    id: "clients",
+    label: "Clients",
+    icon: Building2Icon,
+    description: "The businesses you manage, each in its own workspace.",
+    href: routes.clients,
+    match: "prefix",
+    visible: canManageClients,
   },
   {
     id: "funnels",

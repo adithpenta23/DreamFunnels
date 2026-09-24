@@ -28,6 +28,8 @@ const SUPABASE_PLATFORM_SHIM = /* sql */ `
     id uuid primary key default gen_random_uuid(),
     email text unique,
     raw_user_meta_data jsonb not null default '{}'::jsonb,
+    -- GoTrue sets it on confirmation, or at sign-up when confirmation is off.
+    email_confirmed_at timestamptz default now(),
     created_at timestamptz not null default now()
   );
   grant all on auth.users to supabase_auth_admin;
@@ -54,8 +56,16 @@ export type Tx = Transaction
 export type TestDb = {
   /** Superuser connection. Bypasses RLS; use only for fixtures and assertions. */
   admin: PGlite
-  /** Creates a user the way GoTrue does, firing the signup trigger. */
-  createUser: (email: string, metadata?: Record<string, unknown>) => Promise<string>
+  /**
+   * Creates a user the way GoTrue does, firing the signup trigger. Confirmed by
+   * default (as with confirmation off); pass `confirmed: false` for a user
+   * who hasn't followed the confirmation link yet.
+   */
+  createUser: (
+    email: string,
+    metadata?: Record<string, unknown>,
+    options?: { confirmed?: boolean }
+  ) => Promise<string>
   /** Runs `fn` as an authenticated user (RLS enforced). */
   asUser: <T>(userId: string, fn: (tx: Tx) => Promise<T>) => Promise<T>
   /** Runs `fn` as the anonymous role (RLS enforced). */
@@ -108,12 +118,13 @@ export async function createTestDb({ stopBefore }: TestDbOptions = {}): Promise<
 
   return {
     admin,
-    async createUser(email, metadata = {}) {
+    async createUser(email, metadata = {}, { confirmed = true } = {}) {
       return admin.transaction(async (tx) => {
         await tx.exec("set local role supabase_auth_admin")
         const { rows } = await tx.query<{ id: string }>(
-          "insert into auth.users (email, raw_user_meta_data) values ($1, $2) returning id",
-          [email, JSON.stringify(metadata)]
+          `insert into auth.users (email, raw_user_meta_data, email_confirmed_at)
+           values ($1, $2, case when $3 then now() end) returning id`,
+          [email, JSON.stringify(metadata), confirmed]
         )
         const row = rows[0]
         if (!row) throw new Error("Failed to create test user")

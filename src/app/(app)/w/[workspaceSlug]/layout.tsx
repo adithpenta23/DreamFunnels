@@ -2,7 +2,11 @@ import { AppShell } from "@/components/layout/app-shell"
 import { AppContextProvider } from "@/components/providers/app-context"
 import { getCurrentProfile } from "@/features/account/server/profile"
 import { RememberWorkspace } from "@/features/workspaces/components/remember-workspace"
-import { listMyWorkspaces, requireWorkspaceMember } from "@/features/workspaces/server/queries"
+import {
+  getVisibleParentAgency,
+  listSwitcherWorkspaces,
+  requireWorkspaceMember,
+} from "@/features/workspaces/server/queries"
 
 /**
  * The workspace shell. Resolves the workspace from the URL (404 for
@@ -18,7 +22,11 @@ export default async function WorkspaceLayout({
 }: LayoutProps<"/w/[workspaceSlug]">) {
   const { workspaceSlug } = await params
   const workspace = await requireWorkspaceMember(workspaceSlug)
-  const [workspaces, profile] = await Promise.all([listMyWorkspaces(), getCurrentProfile()])
+  const [{ workspaces, moreClients }, profile, parent] = await Promise.all([
+    listSwitcherWorkspaces(),
+    getCurrentProfile(),
+    getVisibleParentAgency(workspace),
+  ])
 
   return (
     <AppContextProvider
@@ -26,6 +34,8 @@ export default async function WorkspaceLayout({
         user: { id: profile.id, email: profile.email, fullName: profile.fullName },
         workspace,
         workspaces,
+        moreClients,
+        parentWorkspace: parent ? { name: parent.name, slug: parent.slug } : null,
       }}
     >
       <RememberWorkspace userId={profile.id} slug={workspace.slug} />

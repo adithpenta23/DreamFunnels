@@ -19,6 +19,13 @@ export type AnalyticsEvents = {
   profile_updated: Record<string, never>
   workspace_updated: { slugChanged: boolean }
   workspace_profile_updated: Record<string, never>
+  client_created: { invitationSent: boolean }
+  member_invited: { role: "member" | "admin" }
+  invitation_resent: Record<string, never>
+  invitation_revoked: Record<string, never>
+  invitation_accepted: Record<string, never>
+  member_role_changed: { role: "member" | "admin" }
+  member_removed: Record<string, never>
 }
 
 export type AnalyticsEventName = keyof AnalyticsEvents

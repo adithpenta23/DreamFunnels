@@ -1,5 +1,5 @@
 import { CircleCheckIcon, CircleDashedIcon } from "lucide-react"
-import type { Metadata } from "next"
+import type { Metadata, Route } from "next"
 import Link from "next/link"
 import { PageHeader } from "@/components/layout/page-header"
 import { Badge } from "@/components/ui/badge"
@@ -8,7 +8,10 @@ import { WORKSPACE_NAV } from "@/config/navigation"
 import { routes } from "@/config/routes"
 import { getCurrentProfile } from "@/features/account/server/profile"
 import { WORKSPACE_ROLE_LABELS } from "@/features/workspaces/lib/roles"
-import { requireWorkspaceMember } from "@/features/workspaces/server/queries"
+import {
+  getVisibleParentAgency,
+  requireWorkspaceMember,
+} from "@/features/workspaces/server/queries"
 
 /**
  * Workspace home, and the template for every tenant-scoped page: resolve the
@@ -29,6 +32,7 @@ export default async function WorkspaceDashboardPage({ params }: PageProps<"/w/[
     requireWorkspaceMember(workspaceSlug),
     getCurrentProfile(),
   ])
+  const agency = await getVisibleParentAgency(workspace)
   const firstName = profile.fullName?.trim().split(/\s+/)[0]
 
   const steps = [
@@ -36,8 +40,8 @@ export default async function WorkspaceDashboardPage({ params }: PageProps<"/w/[
     { label: `Set up ${workspace.name}`, done: true },
     { label: "Build your first funnel", done: false },
     { label: "Connect your domain", done: false },
-    { label: "Invite your team", done: false },
-  ]
+    { label: "Invite your team", done: false, href: routes.workspaceMembers(workspace.slug) },
+  ] satisfies { label: string; done: boolean; href?: Route }[]
   const completed = steps.filter((step) => step.done).length
   const upcoming = WORKSPACE_NAV.filter((item) => !item.href)
 
@@ -52,6 +56,17 @@ export default async function WorkspaceDashboardPage({ params }: PageProps<"/w/[
         }
         actions={<Badge variant="outline">{WORKSPACE_ROLE_LABELS[workspace.role]}</Badge>}
       />
+      {agency ? (
+        <p className="-mt-6 text-sm text-muted-foreground">
+          Client of{" "}
+          <Link
+            href={routes.workspace(agency.slug)}
+            className="font-medium text-foreground underline-offset-4 hover:underline"
+          >
+            {agency.name}
+          </Link>
+        </p>
+      ) : null}
 
       <Card>
         <CardHeader>
@@ -71,11 +86,17 @@ export default async function WorkspaceDashboardPage({ params }: PageProps<"/w/[
                 ) : (
                   <CircleDashedIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
                 )}
-                <span className={step.done ? "text-muted-foreground line-through" : undefined}>
-                  {step.label}
-                </span>
+                {"href" in step && step.href ? (
+                  <Link href={step.href} className="font-medium underline-offset-4 hover:underline">
+                    {step.label}
+                  </Link>
+                ) : (
+                  <span className={step.done ? "text-muted-foreground line-through" : undefined}>
+                    {step.label}
+                  </span>
+                )}
                 <span className="sr-only">{step.done ? "(done)" : "(to do)"}</span>
-                {!step.done ? (
+                {!step.done && !("href" in step && step.href) ? (
                   <Badge variant="secondary" className="ml-auto">
                     Soon
                   </Badge>

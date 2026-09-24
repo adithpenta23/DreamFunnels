@@ -2,6 +2,10 @@ import type { EmailOtpType } from "@supabase/supabase-js"
 import { NextResponse, type NextRequest } from "next/server"
 import { routes } from "@/config/routes"
 import { getSafeRedirectPath } from "@/features/auth/lib/redirect"
+import {
+  destinationAfterEmailLink,
+  PENDING_INVITATION_COOKIE,
+} from "@/features/invitations/lib/pending-invitation"
 import { logger } from "@/lib/logger"
 import { createClient } from "@/lib/supabase/server"
 
@@ -46,7 +50,13 @@ export async function GET(request: NextRequest) {
   }
 
   if (failure === undefined) {
-    return NextResponse.redirect(new URL(next, request.url))
+    // Someone who signed up from an invitation goes back to it once confirmed.
+    const pendingInvitation = request.cookies.get(PENDING_INVITATION_COOKIE)?.value
+    const response = NextResponse.redirect(
+      new URL(destinationAfterEmailLink(next, pendingInvitation), request.url)
+    )
+    if (pendingInvitation !== undefined) response.cookies.delete(PENDING_INVITATION_COOKIE)
+    return response
   }
 
   logger.warn("auth.callback_failed", { reason: failure, type })

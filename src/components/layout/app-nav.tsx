@@ -55,10 +55,13 @@ function NavEntry({ item }: { item: WorkspaceNavItem }) {
 
 /** The workspace sidebar navigation, driven by config/navigation.ts. */
 export function AppNav() {
+  const workspace = useCurrentWorkspace()
+  const items = WORKSPACE_NAV.filter((item) => item.visible?.(workspace) ?? true)
+
   return (
     <nav aria-label="Main" className="flex flex-1 flex-col gap-4">
       <ul className="grid gap-0.5">
-        {WORKSPACE_NAV.map((item) => (
+        {items.map((item) => (
           <li key={item.id}>
             <NavEntry item={item} />
           </li>

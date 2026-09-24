@@ -132,6 +132,16 @@ export function WorkspaceProfileForm({
             />
           </FormField>
         </div>
+        <FormField id="websiteUrl" label="Website" error={fieldErrors?.websiteUrl}>
+          <Input
+            type="url"
+            inputMode="url"
+            autoComplete="url"
+            maxLength={2048}
+            placeholder="https://yourbusiness.com"
+            {...text("websiteUrl")}
+          />
+        </FormField>
         <FormField
           id="timezone"
           label="Time zone"

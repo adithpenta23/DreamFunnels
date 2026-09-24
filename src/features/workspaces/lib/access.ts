@@ -31,15 +31,3 @@ export function authorizeWorkspaceAccess(
 export function canManageWorkspace(role: WorkspaceRole): boolean {
   return hasWorkspaceRole(role, "admin")
 }
-
-/**
- * The workspace to open after sign-in: the preferred one if the user still
- * belongs to it, else their first (oldest) workspace, else null (onboarding).
- */
-export function pickDefaultWorkspace<T extends { slug: string }>(
-  workspaces: readonly T[],
-  preferredSlug: string | null
-): T | null {
-  const preferred = preferredSlug ? workspaces.find((w) => w.slug === preferredSlug) : undefined
-  return preferred ?? workspaces[0] ?? null
-}
