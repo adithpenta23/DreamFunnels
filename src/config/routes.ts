@@ -16,7 +16,13 @@ export const routes = {
   newWorkspace: "/workspaces/new",
   workspace: (slug: string) => workspaceBase(slug) as Route,
   workspaceSettings: (slug: string) => `${workspaceBase(slug)}/settings` as Route,
+  workspaceMembers: (slug: string) => `${workspaceBase(slug)}/settings/members` as Route,
   accountSettings: (slug: string) => `${workspaceBase(slug)}/settings/account` as Route,
+  /** An agency's client workspaces. */
+  clients: (slug: string) => `${workspaceBase(slug)}/clients` as Route,
+  newClient: (slug: string) => `${workspaceBase(slug)}/clients/new` as Route,
+  /** The public page an invitation email links to. The token is a secret: never log this path. */
+  invitation: (token: string) => `/invite/${encodeURIComponent(token)}` as Route,
 } as const
 
 /** Where signed-in users land by default. */

@@ -93,3 +93,24 @@ describe("SignupForm", () => {
     expect(screen.queryByRole("button", { name: "Solve challenge" })).not.toBeInTheDocument()
   })
 })
+
+describe("SignupForm from an invitation", () => {
+  it("fixes the email to the invited address and carries the invitation", async () => {
+    signUpMock.mockResolvedValue({ ok: true, data: { email: "alex@example.com" } })
+    const token = "T".repeat(43)
+    render(<SignupForm invitation={{ token, email: "alex@example.com" }} />)
+
+    const email = screen.getByLabelText("Work email")
+    expect(email).toHaveValue("alex@example.com")
+    expect(email).toHaveAttribute("readonly")
+    expect(screen.getByText("Your invitation is for this address.")).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "correct horse" } })
+    fireEvent.click(screen.getByRole("button", { name: "Create account" }))
+
+    expect(await screen.findByText(/return to your invitation/)).toBeInTheDocument()
+    const formData = signUpMock.mock.calls[0]?.[1]
+    expect(formData?.get("invite")).toBe(token)
+    expect(formData?.get("email")).toBe("alex@example.com")
+  })
+})

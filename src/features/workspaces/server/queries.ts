@@ -6,11 +6,17 @@ import { cache } from "react"
 import { requireUser } from "@/features/auth/server/session"
 import { AppError } from "@/lib/errors"
 import { createClient } from "@/lib/supabase/server"
-import { authorizeWorkspaceAccess, pickDefaultWorkspace } from "../lib/access"
+import { authorizeWorkspaceAccess } from "../lib/access"
 import { LAST_WORKSPACE_COOKIE, parseLastWorkspace } from "../lib/last-workspace"
 import type { WorkspaceRole } from "../lib/roles"
 import { WORKSPACE_SLUG_PATTERN } from "../lib/slug"
-import type { WorkspaceProfile, WorkspaceSummary } from "../types"
+import type {
+  ClientSummary,
+  WorkspaceMember,
+  WorkspaceProfile,
+  WorkspaceSummary,
+  WorkspaceType,
+} from "../types"
 
 /**
  * Workspace data access. Every function authenticates first and queries with
@@ -19,18 +25,26 @@ import type { WorkspaceProfile, WorkspaceSummary } from "../types"
  * agency's client workspaces.
  */
 
-export type { WorkspaceProfile, WorkspaceSummary }
+export type { ClientSummary, WorkspaceMember, WorkspaceProfile, WorkspaceSummary }
 
 // `viewer_role` is a computed field (public.viewer_role): the caller's
 // effective role, direct or inherited from the parent agency.
-const WORKSPACE_SUMMARY = "id, name, slug, created_at, viewer_role" as const
+const WORKSPACE_SUMMARY =
+  "id, name, slug, created_at, workspace_type, parent_workspace_id, viewer_role" as const
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** Clients shown in the workspace switcher; the rest are on the Clients page. */
+export const SWITCHER_CLIENT_LIMIT = 20
+/** Rows per page on the Clients page. */
+export const CLIENTS_PAGE_SIZE = 25
 
 type WorkspaceRow = {
   id: string
   name: string
   slug: string
   created_at: string
+  workspace_type: WorkspaceType
+  parent_workspace_id: string | null
   viewer_role: WorkspaceRole | null
 }
 
@@ -41,6 +55,8 @@ function toSummary(row: WorkspaceRow | null): WorkspaceSummary | null {
     name: row.name,
     slug: row.slug,
     role: row.viewer_role,
+    type: row.workspace_type,
+    parentId: row.parent_workspace_id,
     createdAt: row.created_at,
   }
 }
@@ -52,18 +68,59 @@ function loadFailed(what: string, error: { code: string }) {
   })
 }
 
-/** Every workspace the caller can open, oldest first. Empty means onboarding hasn't happened. */
-export const listMyWorkspaces = cache(async (): Promise<WorkspaceSummary[]> => {
+/**
+ * The workspaces for the switcher: every agency-level workspace the caller
+ * belongs to (oldest first), then up to SWITCHER_CLIENT_LIMIT client
+ * workspaces by name. An agency with hundreds of clients never loads them all
+ * here; `moreClients` says there are others to find on the Clients page.
+ */
+export const listSwitcherWorkspaces = cache(
+  async (): Promise<{ workspaces: WorkspaceSummary[]; moreClients: boolean }> => {
+    await requireUser()
+    const supabase = await createClient()
+
+    const [agencies, clients] = await Promise.all([
+      supabase
+        .from("workspaces")
+        .select(WORKSPACE_SUMMARY)
+        .eq("workspace_type", "agency")
+        .order("created_at", { ascending: true }),
+      supabase
+        .from("workspaces")
+        .select(WORKSPACE_SUMMARY)
+        .eq("workspace_type", "client")
+        .order("name", { ascending: true })
+        .limit(SWITCHER_CLIENT_LIMIT + 1),
+    ])
+    if (agencies.error) throw loadFailed("workspaces", agencies.error)
+    if (clients.error) throw loadFailed("client workspaces", clients.error)
+
+    return {
+      workspaces: [
+        ...agencies.data.flatMap((row) => toSummary(row) ?? []),
+        ...clients.data.slice(0, SWITCHER_CLIENT_LIMIT).flatMap((row) => toSummary(row) ?? []),
+      ],
+      moreClients: clients.data.length > SWITCHER_CLIENT_LIMIT,
+    }
+  }
+)
+
+/**
+ * The caller's oldest workspace, or null when they have none (they need
+ * onboarding, or haven't accepted an invitation yet).
+ */
+export const getFirstWorkspace = cache(async (): Promise<WorkspaceSummary | null> => {
   await requireUser()
   const supabase = await createClient()
-
   const { data, error } = await supabase
     .from("workspaces")
     .select(WORKSPACE_SUMMARY)
     .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle()
 
   if (error) throw loadFailed("workspaces", error)
-  return data.flatMap((row) => toSummary(row) ?? [])
+  return toSummary(data)
 })
 
 /** The workspace with the caller's role, or null if it doesn't exist or they have no access. */
@@ -99,6 +156,17 @@ export const getWorkspaceById = cache(async (id: string): Promise<WorkspaceSumma
 })
 
 /**
+ * The agency that manages a client workspace, if the caller can see it (agency
+ * owners and admins can; the client's own members can't, by design).
+ */
+export async function getVisibleParentAgency(
+  workspace: Pick<WorkspaceSummary, "type" | "parentId">
+): Promise<WorkspaceSummary | null> {
+  if (workspace.type !== "client" || !workspace.parentId) return null
+  return getWorkspaceById(workspace.parentId)
+}
+
+/**
  * The business profile of a workspace the caller can see. Call it after
  * requireWorkspaceMember(); RLS hides other tenants' rows regardless.
  */
@@ -108,7 +176,7 @@ export const getWorkspaceProfile = cache(async (workspaceId: string): Promise<Wo
   const { data, error } = await supabase
     .from("workspaces")
     .select(
-      "timezone, business_name, business_email, business_phone, address_line1, address_line2, address_city, address_region, address_postal_code, address_country, logo_url, brand_primary_color, brand_secondary_color"
+      "timezone, business_name, business_email, business_phone, website_url, address_line1, address_line2, address_city, address_region, address_postal_code, address_country, logo_url, brand_primary_color, brand_secondary_color"
     )
     .eq("id", workspaceId)
     .maybeSingle()
@@ -122,6 +190,7 @@ export const getWorkspaceProfile = cache(async (workspaceId: string): Promise<Wo
     businessName: data.business_name,
     businessEmail: data.business_email,
     businessPhone: data.business_phone,
+    websiteUrl: data.website_url,
     addressLine1: data.address_line1,
     addressLine2: data.address_line2,
     addressCity: data.address_city,
@@ -133,6 +202,78 @@ export const getWorkspaceProfile = cache(async (workspaceId: string): Promise<Wo
     brandSecondaryColor: data.brand_secondary_color,
   }
 })
+
+/** `%`, `_` and `\` are wildcards/escapes in LIKE patterns; match them literally. */
+const likePattern = (text: string) =>
+  `%${text.replace(/[\\%_]/g, (character) => `\\${character}`)}%`
+
+/**
+ * One page of an agency's clients, by name, with member and invitation counts
+ * (computed fields, so it's one query however many clients there are). Call it
+ * after checking the caller manages clients; RLS applies regardless.
+ */
+export async function listClients(
+  agencyId: string,
+  options: { page: number; search?: string | undefined }
+): Promise<{ clients: ClientSummary[]; total: number }> {
+  await requireUser()
+  const supabase = await createClient()
+  const from = (options.page - 1) * CLIENTS_PAGE_SIZE
+
+  let query = supabase
+    .from("workspaces")
+    .select(
+      "id, name, slug, business_name, business_email, business_phone, timezone, created_at, member_count, pending_invitation_count",
+      { count: "exact" }
+    )
+    .eq("parent_workspace_id", agencyId)
+    .eq("workspace_type", "client")
+  if (options.search) query = query.ilike("name", likePattern(options.search))
+
+  const { data, error, count } = await query
+    .order("name", { ascending: true })
+    .order("id", { ascending: true })
+    .range(from, from + CLIENTS_PAGE_SIZE - 1)
+
+  if (error) throw loadFailed("clients", error)
+  return {
+    total: count ?? data.length,
+    clients: data.map((row) => ({
+      id: row.id,
+      name: row.name,
+      slug: row.slug,
+      businessName: row.business_name,
+      businessEmail: row.business_email,
+      businessPhone: row.business_phone,
+      timezone: row.timezone,
+      createdAt: row.created_at,
+      memberCount: row.member_count ?? 0,
+      pendingInvitationCount: row.pending_invitation_count ?? 0,
+    })),
+  }
+}
+
+/** Direct members of a workspace, oldest first. Every member may see the list (RLS). */
+export const listWorkspaceMembers = cache(
+  async (workspaceId: string): Promise<WorkspaceMember[]> => {
+    await requireUser()
+    const supabase = await createClient()
+    const { data, error } = await supabase
+      .from("workspace_members")
+      .select("user_id, role, created_at, profile:profiles(full_name, email)")
+      .eq("workspace_id", workspaceId)
+      .order("created_at", { ascending: true })
+
+    if (error) throw loadFailed("members", error)
+    return data.map((row) => ({
+      userId: row.user_id,
+      role: row.role,
+      joinedAt: row.created_at,
+      fullName: row.profile?.full_name ?? null,
+      email: row.profile?.email ?? null,
+    }))
+  }
+)
 
 /**
  * Gate for every workspace-scoped page and layout. Callers without access get
@@ -161,7 +302,8 @@ export async function requireWorkspaceMember(
  */
 export async function requireWorkspaceAccess(
   workspaceId: string,
-  minimumRole: WorkspaceRole
+  minimumRole: WorkspaceRole,
+  forbiddenMessage = "Only workspace owners and admins can change these settings."
 ): Promise<WorkspaceSummary> {
   const workspace = await getWorkspaceById(workspaceId)
   const access = authorizeWorkspaceAccess(workspace, minimumRole)
@@ -171,7 +313,7 @@ export async function requireWorkspaceAccess(
       notFoundError ? "NOT_FOUND" : "FORBIDDEN",
       notFoundError
         ? "This workspace doesn't exist, or you don't have access to it."
-        : "Only workspace owners and admins can change these settings.",
+        : forbiddenMessage,
       { expose: true, context: { workspaceId, required: minimumRole, actual: workspace?.role } }
     )
   }
@@ -180,13 +322,13 @@ export async function requireWorkspaceAccess(
 
 /**
  * Where a signed-in user should land: their last-used workspace on this
- * device if they still belong to it, else their oldest one, else null
- * (they need onboarding).
+ * device if they can still open it, else their oldest one, else null (they
+ * need onboarding). Two small queries, however many clients an agency has.
  */
 export async function resolveDefaultWorkspace(): Promise<WorkspaceSummary | null> {
   const user = await requireUser()
-  const workspaces = await listMyWorkspaces()
   const cookieStore = await cookies()
-  const preferred = parseLastWorkspace(cookieStore.get(LAST_WORKSPACE_COOKIE)?.value, user.id)
-  return pickDefaultWorkspace(workspaces, preferred)
+  const preferredSlug = parseLastWorkspace(cookieStore.get(LAST_WORKSPACE_COOKIE)?.value, user.id)
+  const preferred = preferredSlug ? await getWorkspaceBySlug(preferredSlug) : null
+  return preferred ?? (await getFirstWorkspace())
 }

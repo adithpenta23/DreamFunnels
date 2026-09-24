@@ -1,10 +1,10 @@
 # Architecture
 
 DreamFunnels is a funnel, website and lead-to-appointment platform for agencies and local-service
-businesses. This document describes the system as it stands after Sprint 2 (agency → client
-tenancy, business profiles, time zones and auth abuse protection, on the Sprint 0–1 foundation),
-the rules every feature must follow, and the decisions behind them. Keep it current: an architectural
-change isn't done until this file says so.
+businesses. This document describes the system as it stands after Sprint 3 (client workspaces,
+members, invitations and transactional email, on Sprint 2's agency → client tenancy and the
+Sprint 0–1 foundation), the rules every feature must follow, and the decisions behind them. Keep
+it current: an architectural change isn't done until this file says so.
 
 ## At a glance
 
@@ -17,6 +17,7 @@ change isn't done until this file says so.
 | Tenancy         | Workspaces: agencies, each with one level of client workspaces               |
 | Authentication  | Supabase Auth, email + password, sessions in HTTP-only cookies               |
 | Abuse control   | App-level rate limits (per IP and email, Postgres) + Turnstile CAPTCHA       |
+| Email           | Transactional only: Resend (hosted) / Mailpit (local), behind an interface   |
 | UI              | Tailwind CSS v4, shadcn/ui (Base UI primitives, incl. Toast), lucide         |
 | Validation      | Zod 4 at every trust boundary (env, forms, actions)                          |
 | Client state    | Zustand, only for ephemeral UI state; React context for app context          |
@@ -47,7 +48,7 @@ flowchart LR
   ci.yml                     CI quality gates
   deploy-database.yml        Manual: migrate a hosted project, then verify its Auth settings
 docs/                        Architecture, database and QA docs
-e2e/                         Playwright specs (smoke: no backend; auth, workspaces: need Supabase)
+e2e/                         Playwright specs (smoke: no backend; the rest need Supabase + Mailpit)
 scripts/verify-hosted-auth.mts  npm run verify:hosted (hosted Auth settings check)
 supabase/
   config.toml                Local stack config (auth settings, redirect URLs, ports)
@@ -57,11 +58,12 @@ supabase/
 src/
   app/                       Routes only: thin files that compose features
     (marketing)/             Public pages (landing)
-    (auth)/                  login, signup, forgot-password, reset-password (centered card)
+    (auth)/                  login, signup, forgot-password, reset-password, invite/[token] (centered card)
     (app)/                   Signed-in area (layout: requireUser)
       dashboard/             Post-sign-in landing: redirects to onboarding or a workspace
       (setup)/               onboarding, workspaces/new (focused layout, no shell)
-      w/[workspaceSlug]/     Workspace shell + dashboard home, settings (general, account)
+      w/[workspaceSlug]/     Workspace shell + dashboard home, clients (agencies),
+                             settings (general, members, account)
     auth/callback/           Supabase email-link completion (confirm, recovery)
     api/health/              Liveness probe
   components/
@@ -76,6 +78,7 @@ src/
     supabase/                Client factories: server, client (browser), proxy, admin
     rate-limit/              rateLimit(policy, subject) and its stores (Postgres, memory)
     captcha/                 Turnstile verification (server) + constants shared with the widget
+    email/                   Email transport: EmailProvider interface, Resend and Mailpit adapters
     timezones.ts             IANA time zones: canonical list, validation, readable labels
     countries.ts phone.ts request-ip.ts
     logger.ts monitoring.ts analytics.ts errors.ts action-result.ts run-action.ts
@@ -108,15 +111,18 @@ Rules:
 
 Current slices:
 
-| Slice        | Owns                                                                                                |
-| ------------ | --------------------------------------------------------------------------------------------------- |
-| `auth`       | Sign up/in/out, password reset and change, session guards, error mapping, routing, abuse protection |
-| `account`    | The user's profile: name, phone, time zone, locale                                                  |
-| `onboarding` | First-run setup: name + first workspace (seeded with the browser's time zone and locale)            |
-| `workspaces` | Workspaces, access guards (incl. agency access), slugs, switcher, settings, business profile        |
+| Slice         | Owns                                                                                                |
+| ------------- | --------------------------------------------------------------------------------------------------- |
+| `auth`        | Sign up/in/out, password reset and change, session guards, error mapping, routing, abuse protection |
+| `account`     | The user's profile: name, phone, time zone, locale                                                  |
+| `onboarding`  | First-run setup: name + first workspace (seeded with the browser's time zone and locale)            |
+| `workspaces`  | Workspaces, access guards (incl. agency access), slugs, switcher, settings, business profile,       |
+|               | clients (list, "Add client"), members (list, role changes, removal)                                 |
+| `invitations` | Invitations: tokens, invite/resend/revoke, the public invitation page, acceptance                   |
+| `email`       | Transactional email: version-controlled templates and `sendTransactionalEmail()`                    |
 
 Future slices plug in the same way: `features/funnels`, `features/pages`, `features/publishing`,
-`features/domains`, `features/forms`, `features/contacts`, `features/email`,
+`features/domains`, `features/forms`, `features/contacts`,
 `features/automations`, `features/ai`, `features/billing`. A new module also gets an entry in
 `src/config/navigation.ts` (it shows as "Soon" until it has an `href`).
 
@@ -251,8 +257,8 @@ Rules for feature code:
 - Signup creates only the profile. The first workspace is created in **onboarding**, where the
   user names it (Sprint 1; Sprint 0 auto-provisioned a "personal workspace", see decision 13).
 - Workspace creation and membership inserts go only through trusted SQL functions
-  (`create_workspace()`, future `accept_invitation()`), so no workspace is ever ownerless and no
-  one is added without consent.
+  (`create_workspace()`, `create_client_workspace()`, `accept_workspace_invitation()`), so no
+  agency is ever ownerless and no one is added without consent.
 
 ### Workspace context and switching
 
@@ -263,14 +269,17 @@ Rules for feature code:
 - **Client**: the workspace layout fills `AppContextProvider` (`components/providers/app-context.tsx`)
   with the verified user, current workspace and the user's workspace list. Client Components read
   `useAppContext()`, `useCurrentWorkspace()` (e.g. `.id`) and `useCurrentUser()`.
-- **Switching** is navigation: the switcher links to `/w/<other-slug>`.
+- **Switching** is navigation: the switcher links to `/w/<other-slug>`. It lists the user's
+  agency-level workspaces, then at most 20 client workspaces by name (`listSwitcherWorkspaces`),
+  plus "View all clients" when there are more; an agency with hundreds of clients never loads
+  them all per page. The current client is always listed, and a client shows "Client of
+  <agency>" when the viewer can see that agency.
 - **Remembering**: `RememberWorkspace` (in the workspace layout) writes a `df_last_workspace`
   cookie, `<userId>:<slug>`, whenever a workspace is shown. `/dashboard` reopens it after sign-in if
-  the user is still a member (`pickDefaultWorkspace`), else the oldest workspace. It's a preference,
+  the user can still open it (`resolveDefaultWorkspace`), else the oldest workspace. It's a preference,
   never an authorization input: it's scoped to the user, validated, and ignored for anyone else. It's
   written by the page rather than the proxy because the proxy also sees link prefetches.
-- **Future team members**: roles and RLS already support admins/members; invitations add a
-  `workspace_invitations` table and an `accept_invitation()` function (see DATABASE.md).
+- **Team members** join by invitation (see "Members and invitations").
 
 ### Agency → client hierarchy
 
@@ -299,11 +308,162 @@ flowchart TD
 - The rule lives in one place, `private.user_workspace_ids()` (which workspaces) and
   `private.workspace_role()` (which role), so every existing and future policy applies it.
   Details, invariants and delete behaviour: `docs/DATABASE.md` "Agency → client hierarchy".
-- Nobody can change a workspace's type or parent through the API (no column grants). Creating
-  clients, moving them between agencies and detaching them are future trusted functions (the
-  agency onboarding sprint); until then there is no client-creation UI.
+- Nobody can change a workspace's type or parent through the API (no column grants). Moving
+  clients between agencies and detaching them remain future trusted functions.
 - Client members can't see their agency, and so can't see agency staff's profiles either. Features
   that show "managed by" or agency staff in a client need an explicit, narrow read path.
+
+### Client workspaces
+
+Agency owners and admins manage clients at `/w/<agency>/clients` ("Clients" in the sidebar, shown
+to them only; agency members get an explanation, clients a 404):
+
+- **List**: name, status (Active = has direct members, Invitation pending, No members yet),
+  primary contact, time zone, member count and created date; `?q=` search and 25 per page in the
+  URL. One query per page: the counts are PostgREST computed fields (`member_count`,
+  `pending_invitation_count`), not a query per client.
+- **Add client** (`/clients/new`): one focused form (business, address, workspace name and URL,
+  and optionally who to invite) with a "What happens next" summary, rather than a wizard: it's
+  short, and the summary states the consequences before anything happens. The action calls
+  `create_client_workspace()`, which checks that the caller owns or administers the agency (the
+  id from the form is only a reference) and writes the client and its business profile in one
+  transaction. The client starts empty: no data, no direct members (agency owners and admins
+  reach it by inheritance), no credentials. Snapshots will deploy into it later.
+- The optional invitation runs **after** the client exists: if it fails (rate limit, email
+  outage), the client is still created and the success screen says exactly what happened.
+- Client names are unique within an agency (case-insensitive), which also makes a double submit
+  fail instead of creating two clients. Slugs stay globally unique, generated like
+  `create_workspace()`'s.
+- Clients use the same app shell, settings and members pages as agencies; only the data differs.
+
+## Members and invitations
+
+`/w/<slug>/settings/members` lists a workspace's **direct** members (name, email, role, joined)
+and, for owners and admins, its open invitations. On a client viewed by agency staff, a note says
+the agency's owners and admins can also manage it (they aren't listed: their access is inherited).
+
+### Who can do what
+
+| Action                                | Member | Admin                      | Owner                          |
+| ------------------------------------- | ------ | -------------------------- | ------------------------------ |
+| See members                           | yes    | yes                        | yes                            |
+| See, send, resend, revoke invitations | no     | yes (member or admin role) | yes (member or admin role)     |
+| Change a role (member ⇄ admin)        | no     | non-owners                 | anyone, incl. demoting owners¹ |
+| Remove someone                        | no     | non-owners                 | anyone¹                        |
+| Grant ownership                       | no     | no                         | not in this release²           |
+| Add client workspaces (agencies)      | no     | yes                        | yes                            |
+| Act on your own row (role, removal)   | no     | no                         | no                             |
+
+¹ Never the last owner: the `protect_last_owner` trigger refuses it and the UI explains why.
+² Invitations can't grant `owner` (a CHECK constraint), and the role picker offers member and
+admin only. An ownership-transfer flow is future work. "Admin" in an agency means admin of every
+client too, which the role picker says in so many words.
+
+`memberActionsFor()` (`features/workspaces/lib/members.ts`) is the pure rule the UI and the
+actions share; RLS on `workspace_members` and the trigger enforce it again underneath.
+Removing someone deletes the membership only: never their account or their other workspaces.
+
+### Invitation lifecycle
+
+```mermaid
+sequenceDiagram
+  participant Admin
+  participant App as Server Action
+  participant DB as Postgres
+  participant Mail as Email provider
+  participant Invitee
+  Admin->>App: invite(email, role)
+  App->>App: rate limits · token = 32 random bytes
+  App->>DB: create_workspace_invitation(sha256(token))
+  DB-->>App: created | already_pending | already_member
+  App->>Mail: email with /invite/<token>
+  App->>DB: record delivery (sent | failed) for this token
+  Invitee->>App: GET /invite/<token>
+  App->>DB: get_workspace_invitation(sha256(token))
+  Invitee->>App: sign in / create account (same email)
+  Invitee->>App: Accept
+  App->>DB: accept_workspace_invitation(sha256(token))
+  DB-->>App: accepted (membership + acceptance, one transaction)
+```
+
+- **Tokens** are 256 random bits (`crypto.randomBytes`), base64url, only in the emailed link.
+  The database stores their SHA-256 (hex), looked up through a unique index. A fast hash is right
+  for a full-entropy secret; lookups happen in Postgres, so there's no timing side channel in app
+  code. Tokens never appear in our logs (`onRequestError` redacts `/invite/<token>`), analytics,
+  error messages or the provider's idempotency key.
+- **One open invitation per workspace and address** (partial unique index). Inviting an address
+  with a pending invitation returns `already_pending`, and the dialog offers Resend or Cancel;
+  an expired one is reissued on the same row. Double clicks and concurrent requests end with one
+  row (tested against the real database).
+- **Expiry** is 7 days, a database timestamp checked at acceptance. **Resend** rotates the token
+  (the old link stops working), resets the expiry and sends again. **Revoke** marks the row
+  revoked (kept for the record); the link then shows "cancelled".
+- **The invitation page** (`/invite/[token]`, public) is rendered per request
+  (`force-dynamic`; production sends `private, no-cache, no-store`), sends no Referer, isn't
+  indexed, and shows nothing for malformed, unknown or random tokens. States: pending (sign in /
+  create account), wrong account, expired, cancelled, already used (or "you've joined"), invalid.
+- **Acceptance** needs the token _and_ a signed-in user whose **verified** email
+  (`auth.users.email_confirmed_at`) equals the invited address. The function locks the
+  invitation row, re-checks every condition, inserts the membership (`on conflict do nothing`)
+  and marks it accepted in one transaction, so concurrent accepts produce one membership. The
+  workspace and role come from the invitation, never from the request.
+- **Wrong account**: the page says whom it was sent to and offers "Sign out and continue", which
+  signs out this browser only and returns to the invitation. Nothing switches silently.
+- **New accounts**: "Create an account" opens `/signup?invite=<token>` with the email fixed to
+  the invited address (re-checked by the action). Without email confirmation (local) sign-up
+  lands back on the invitation. With it (staging, production) the confirmation template always
+  returns to `/dashboard`, so sign-up leaves the token in an httpOnly, 24-hour
+  `df_pending_invitation` cookie that `/auth/callback` turns into a redirect back to the
+  invitation (and deletes). The cookie is only a reference: the page and the acceptance
+  re-validate everything. Confirming on another device just means opening the link again.
+  Accounts made this way skip onboarding: the accept form asks for their name instead.
+
+### Audit log
+
+Membership and invitation changes are security-sensitive, so a minimal append-only
+`private.audit_log` records them: a trigger on `workspace_members` (added, role changed, removed,
+left) and the invitation and client functions (invited, resent, revoked, accepted, client
+created), each with the actor (`auth.uid()`), workspace, target and a small JSON payload. It's
+not exposed through the Data API and nobody can update or delete rows. There's no UI yet.
+
+## Transactional email
+
+Business code sends email by calling a feature function (`sendInvitationEmail()`), never a
+provider API:
+
+```
+features/invitations  sendInvitationEmail(invitation)
+        ↓
+features/email        sendTransactionalEmail({ to, template, variables, metadata })
+                      validates variables (Zod), renders the template, logs the outcome
+        ↓
+lib/email             EmailProvider.send(message) → { ok, messageId } | { ok: false, reason }
+                      createResendProvider (hosted) · createMailpitProvider (local, CI)
+```
+
+- **Templates** are version-controlled code (`features/email/templates/`): a typed variables
+  schema and a renderer producing subject, HTML and text. Every interpolated value is
+  HTML-escaped; links must be http(s). A missing or invalid variable fails the send (and is
+  logged by path) instead of mailing "undefined". No tenant-authored HTML exists yet.
+- **Providers never throw for delivery problems**: they return `rejected`, `rate_limited`,
+  `unavailable` or `misconfigured`, keeping the provider's error name but never its message
+  (which can echo addresses). A 10-second timeout bounds every send; there's no automatic retry
+  yet (people can resend). Adding a provider is one adapter file.
+- **Resend over its REST API with `fetch`**: one POST didn't justify an SDK, and it keeps provider
+  types out of the app. Each send carries an `Idempotency-Key` derived from the invitation and
+  its token hash, so a retried request can't send twice.
+- **Mailpit** (in the local Supabase stack) is the default when `EMAIL_PROVIDER` isn't `resend`:
+  mail is captured at http://127.0.0.1:54324 and E2E tests read it back through its API. CI never
+  talks to a third-party provider. Tests use an in-memory fake (`src/test/fake-email.ts`) that no
+  environment variable can select.
+- **Sending happens after the database commit**, outside any transaction. If the provider fails,
+  the invitation stays valid, its row records `delivery_status = failed`, the list shows "Email
+  not delivered", and the UI never says "sent" unless the provider accepted the message. A queue
+  with retries belongs with the future jobs infrastructure.
+- **Links** are built from `NEXT_PUBLIC_APP_URL`, never from request headers.
+- **Configuration**: see "Configuration and secrets". Staging and production builds fail unless
+  `EMAIL_PROVIDER=resend`, `RESEND_API_KEY` and `EMAIL_FROM_ADDRESS` are set, and production
+  rejects Resend's `@resend.dev` test sender.
 
 ## Data access and mutations
 
@@ -415,8 +575,9 @@ flowchart TD
   placeholders.
 - `APP_ENV` (`local` | `staging` | `production`, default `local`) says where a deployment runs.
   `parseDeploymentEnv` (called by `next.config.ts`) fails a staging or production build that is
-  missing `SUPABASE_SECRET_KEY` or the Turnstile keys, uses http or a loopback Supabase URL, or
-  (production) uses Cloudflare's test keys. A Vercel deployment (`VERCEL_ENV` production or
+  missing `SUPABASE_SECRET_KEY`, the Turnstile keys or the email settings (`EMAIL_PROVIDER=resend`,
+  `RESEND_API_KEY`, `EMAIL_FROM_ADDRESS`), uses http or a loopback Supabase URL, or (production)
+  uses Cloudflare's test keys or Resend's `@resend.dev` sender. A Vercel deployment (`VERCEL_ENV` production or
   preview) can't be `local`. Errors list every problem at once, by key name only.
 
 ## State management
@@ -463,8 +624,11 @@ flowchart TD
   project signs with an asymmetric key, and falls back to asking Auth when it only has the legacy
   HS256 secret. Hosted projects must use asymmetric JWT signing keys (checked by
   `npm run verify:hosted`; see "Deployment").
+- Invitations (Sprint 3): hashed single-use tokens, acceptance bound to the verified invited
+  email, uncached and unindexed invitation pages, rate-limited sending, and an append-only audit
+  log of membership changes (see "Members and invitations").
 - Not yet (tracked): Content-Security-Policy with nonces, MFA, email change, account deletion,
-  audit log, Supabase-native CAPTCHA (see below).
+  an audit log UI, Supabase-native CAPTCHA (see below).
 
 ## Abuse protection (rate limiting and CAPTCHA)
 
@@ -512,6 +676,11 @@ stranger's budget for free and lock them out of signing up or resetting a passwo
   password sign-in too (including the password re-check before a password change), so it's a
   deliberate later decision, not part of this sprint.
 - Blocked attempts log `security.rate_limit_blocked` with the policy name only.
+- **Signed-in actions** use the same limiter. Every invitation email (new or resent) spends from
+  three budgets, checked before anything is written (`features/invitations/server/rate-limits.ts`):
+  30 per hour per sender, 100 per day per workspace, and 5 per hour per recipient address across
+  all workspaces, so no inbox gets flooded. Adding clients is limited to 50 per hour per person.
+  Accepting isn't limited: tokens are 256-bit and unguessable.
 
 ## Deployment
 
@@ -542,19 +711,27 @@ Turnstile widget for its hostname, or Cloudflare's always-pass test keys if pref
      expire. Use the new publishable (`sb_publishable_…`) and secret (`sb_secret_…`) API keys.
 2. **Cloudflare Turnstile**: create a widget for the environment's hostname (managed mode) and
    take its site key and secret.
-3. **GitHub**: create an Environment of the same name with secrets `SUPABASE_ACCESS_TOKEN`,
+3. **Resend** (transactional email): add the sending domain (a subdomain such as
+   `mail.example.com` keeps its reputation separate), publish the SPF, DKIM (and a DMARC) DNS
+   records Resend shows and wait for "Verified", then create an API key with **Sending access**
+   only. Set `EMAIL_PROVIDER=resend`, `RESEND_API_KEY`, `EMAIL_FROM_ADDRESS` (an address on that
+   domain) and optionally `EMAIL_FROM_NAME`. Staging may use Resend's `onboarding@resend.dev`
+   sender to test (it only delivers to the Resend account's own address); production refuses it.
+   The same Resend domain can serve as Supabase Auth's custom SMTP (step 1).
+4. **GitHub**: create an Environment of the same name with secrets `SUPABASE_ACCESS_TOKEN`,
    `SUPABASE_DB_PASSWORD` and variables `SUPABASE_PROJECT_REF`, `NEXT_PUBLIC_SUPABASE_URL`,
    `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` (production: add required reviewers). Run the
    **Deploy database** workflow: it links the project, lists and applies migrations
    (`supabase db push`), then runs `npm run verify:hosted`, which fails unless email confirmation is
    on and an asymmetric signing key is published. Migrations are never applied by hand in the
    dashboard.
-4. **Vercel**: set every variable from `.env.example` for that environment, including
+5. **Vercel**: set every variable from `.env.example` for that environment, including
    `APP_ENV`. The build refuses to run half-configured (see "Configuration and secrets").
-5. After a deploy, run the manual QA checklist in `docs/QA.md` on staging before promoting.
+6. After a deploy, run the manual QA checklist in `docs/QA.md` on staging before promoting.
 
 What can't be checked from the repository and stays a manual verification per project: the
-Auth URL settings, SMTP, email templates, and that Turnstile's widget allows the right hostname.
+Auth URL settings, SMTP, email templates, that Turnstile's widget allows the right hostname, and
+that the Resend sending domain is verified (send yourself an invitation on staging).
 
 ### Database connections
 
@@ -582,7 +759,7 @@ database. Keep it that way:
 | Publishing       | Immutable `page_versions` snapshots. A public renderer route reads published snapshots only.                                                                                               |
 | Custom domains   | `proxy.ts` host check rewrites non-app hosts to a `/_sites/[domain]/…` renderer. Domain verification uses the Vercel Domains API from a server job.                                        |
 | Forms & contacts | Public submit endpoint (route handler) with rate limiting and a spam check. It writes via a SECURITY DEFINER function scoped to the published form, never the admin client in a user path. |
-| Email marketing  | A provider adapter in `lib/email/` (e.g. Resend/Postmark) and a queue/cron (Vercel Cron or Supabase Queues) for sends.                                                                     |
+| Email marketing  | Transactional email exists (`lib/email`, `features/email`). Campaigns need a queue/cron (Vercel Cron or Supabase Queues), suppression lists and provider webhooks for delivery status.     |
 | Automations      | An event table + worker. Start with Postgres-backed jobs (`pg_cron`/Supabase Queues) before any external workflow engine.                                                                  |
 | AI generation    | `features/ai` server-only module calling the Claude API. Outputs are validated against the page JSON schema before saving; usage is metered per workspace.                                 |
 | Payments         | `features/billing` with Stripe. Webhooks are route handlers using the admin client; plan limits are enforced server-side and mirrored in RLS where it matters.                             |
@@ -653,3 +830,15 @@ table and feature from now on follows these rules, so snapshots don't need a rew
 | 30  | `APP_ENV` plus build-time deployment validation                                    | A staging or production deploy without CAPTCHA, rate-limit storage or https must fail the build, not run half-protected. Vercel deploys can't claim to be local.                                                                                  |
 | 31  | Hosted Auth settings verified from outside (`verify:hosted`)                       | Email confirmation and JWT signing keys are dashboard settings the repo can't set; public Auth endpoints reveal both, so the deploy workflow checks them.                                                                                         |
 | 32  | No new dependencies in Sprint 2                                                    | Searchable selects use Base UI's Combobox (already installed); Turnstile and siteverify need no SDK; the rate limiter needs no Redis client.                                                                                                      |
+| 33  | Invitation writes only through definer functions; no table write grants            | Role ceilings, "already a member", one-open-per-address and token rotation are rules RLS can't express cleanly; functions keep them atomic and testable, as memberships already were (decision 4).                                                |
+| 34  | Store SHA-256 of a 256-bit token, not the token                                    | A database leak can't be replayed into access. A slow KDF adds nothing for a full-entropy secret; lookup by indexed hash in Postgres avoids app-side comparisons.                                                                                 |
+| 35  | Acceptance requires the token **and** the verified invited email                   | The token proves intent, Supabase Auth proves identity; either alone could let the wrong person in (a forwarded email, or an unconfirmed sign-up for someone else's address).                                                                     |
+| 36  | Invitations grant member or admin only                                             | No ownership-transfer flow exists yet; making "owner" a casual choice would let a client's contact delete agency-managed work.                                                                                                                    |
+| 37  | Client workspaces start with no direct members                                     | Agency owners and admins reach clients by inheritance, so removing someone from the agency removes their client access too; the client's own people join by invitation.                                                                           |
+| 38  | Client names unique per agency                                                     | Two identically named clients confuse everyone, and the constraint turns a double-submitted "Add client" into an error rather than a duplicate.                                                                                                   |
+| 39  | Email sent after commit, delivery recorded per token                               | A provider outage must not lose or corrupt an invitation; recording by token means a late result for a replaced link can't overwrite the current one. A job queue can take over without changing callers.                                         |
+| 40  | Resend via REST + Mailpit locally, no SDK                                          | One POST needs no dependency; Mailpit ships with the local Supabase stack, so dev and CI capture mail without secrets or third parties.                                                                                                           |
+| 41  | Pending-invitation cookie to survive email confirmation                            | The token_hash confirmation template always returns to `/dashboard`; an opaque, httpOnly reference (re-validated on use) keeps the invitee's context without trusting any workspace data from the browser.                                        |
+| 42  | Minimal append-only audit log now                                                  | Membership changes are the most security-sensitive writes so far; a trigger-fed private table is small, catches every write path, and gives a UI or export something to read later.                                                               |
+| 43  | Switcher lists at most 20 clients                                                  | Agencies can have hundreds of clients; the Clients page (search, paging) is the place to find them, and the switcher stays one fast query.                                                                                                        |
+| 44  | No new dependencies in Sprint 3                                                    | Dialog, AlertDialog and Textarea are shadcn components on Base UI (installed); the email transport is `fetch`; no email or templating library.                                                                                                    |

@@ -87,3 +87,77 @@ export async function deleteUsers(emails: readonly string[]): Promise<void> {
     if (user.email && wanted.has(user.email)) await client.auth.admin.deleteUser(user.id)
   }
 }
+
+/** A signed-in supabase-js client for `email`, acting through RLS like the app does. */
+export async function signedInClient(email: string, password: string): Promise<SupabaseClient> {
+  if (!supabaseUrl || !publishableKey) throw new Error("Supabase URL and publishable key required")
+  const client = createClient(supabaseUrl, publishableKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  })
+  const { error } = await client.auth.signInWithPassword({ email, password })
+  if (error) throw error
+  return client
+}
+
+/**
+ * An account that already exists and is confirmed (created directly, as if
+ * the person had signed up earlier). Faster than the sign-up form, and it
+ * doesn't spend the app's sign-up rate limit. Returns the user id.
+ */
+export async function createConfirmedUser(user: {
+  email: string
+  password: string
+  fullName?: string
+}): Promise<string> {
+  const client = adminClient()
+  if (!client) throw new Error("SUPABASE_SECRET_KEY is required to create users")
+  const { data, error } = await client.auth.admin.createUser({
+    email: user.email,
+    password: user.password,
+    email_confirm: true,
+    user_metadata: user.fullName ? { full_name: user.fullName } : {},
+  })
+  if (error) throw error
+  return data.user.id
+}
+
+/**
+ * An agency owned by `owner` with one client, created the way the app does
+ * (create_workspace, create_client_workspace) as that user.
+ */
+export async function provisionAgencyWithClient(
+  owner: { email: string; password: string },
+  names: { agency: string; client: string }
+) {
+  const client = await signedInClient(owner.email, owner.password)
+  const agency = await client.rpc("create_workspace", { p_name: names.agency })
+  if (agency.error) throw agency.error
+  const created = await client.rpc("create_client_workspace", {
+    p_agency_id: agency.data.id,
+    p_name: names.client,
+    p_timezone: "America/Chicago",
+  })
+  if (created.error) throw created.error
+  return {
+    agency: { id: agency.data.id as string, slug: agency.data.slug as string },
+    client: { id: created.data.id as string, slug: created.data.slug as string },
+  }
+}
+
+/** Fixture shortcut (trusted): a membership, as if an invitation had been accepted. */
+export async function addMembership(workspaceId: string, userId: string, role: string) {
+  const client = adminClient()
+  if (!client) throw new Error("SUPABASE_SECRET_KEY is required")
+  const { error } = await client
+    .from("workspace_members")
+    .insert({ workspace_id: workspaceId, user_id: userId, role })
+  if (error) throw error
+}
+
+/** Deletes workspaces, clients before their agencies (agency deletes are RESTRICTed). */
+export async function deleteWorkspaces(ids: { clients: string[]; agencies: string[] }) {
+  const client = adminClient()
+  if (!client) return
+  if (ids.clients.length > 0) await client.from("workspaces").delete().in("id", ids.clients)
+  if (ids.agencies.length > 0) await client.from("workspaces").delete().in("id", ids.agencies)
+}

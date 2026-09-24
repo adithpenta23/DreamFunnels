@@ -1,8 +1,15 @@
 "use server"
 
 import type { Route } from "next"
+import { cookies } from "next/headers"
 import { redirect } from "next/navigation"
 import { routes } from "@/config/routes"
+import {
+  PENDING_INVITATION_COOKIE,
+  PENDING_INVITATION_MAX_AGE_SECONDS,
+} from "@/features/invitations/lib/pending-invitation"
+import { isWellFormedInvitationToken } from "@/features/invitations/lib/tokens"
+import { getInvitationPreview } from "@/features/invitations/server/queries"
 import { ok, validationFailed, type ActionFailure, type ActionResult } from "@/lib/action-result"
 import { CAPTCHA_FIELD } from "@/lib/captcha/shared"
 import { publicEnv } from "@/lib/env/public"
@@ -75,6 +82,35 @@ export async function signIn(_previous: SignInState, formData: FormData): Promis
 /** `ok` means "check your email": the project requires email confirmation. */
 export type SignUpState = ActionResult<{ email: string }> | null
 
+/**
+ * The invitation a sign-up comes from (the `invite` field), re-checked here:
+ * it must still be open, and the new account must use the invited address.
+ * Returns the token, or null for an ordinary sign-up.
+ */
+async function invitationForSignUp(
+  raw: FormDataEntryValue | null,
+  email: string
+): Promise<string | null> {
+  if (raw === null || raw === "") return null
+  if (!isWellFormedInvitationToken(raw)) {
+    throw new AppError("NOT_FOUND", "This invitation link isn't valid.", { expose: true })
+  }
+  const invitation = await getInvitationPreview(raw)
+  if (!invitation || invitation.status !== "pending") {
+    throw new AppError(
+      "CONFLICT",
+      "This invitation is no longer valid. Ask for a new one, or sign up without it.",
+      { expose: true }
+    )
+  }
+  if (invitation.email !== email) {
+    throw new AppError("VALIDATION", "Sign-up email doesn't match the invitation", {
+      fieldErrors: { email: [`Use the address this invitation was sent to: ${invitation.email}`] },
+    })
+  }
+  return raw
+}
+
 export async function signUp(_previous: SignUpState, formData: FormData): Promise<SignUpState> {
   const parsed = signUpSchema.safeParse({
     email: field(formData, "email"),
@@ -87,13 +123,16 @@ export async function signUp(_previous: SignUpState, formData: FormData): Promis
     await limitAuthByIp("signUp")
     await requireHuman(formData.get(CAPTCHA_FIELD), "signup")
     await limitAuthByEmail("signUp", email)
+    const invitationToken = await invitationForSignUp(formData.get("invite"), email)
+    // Back to the invitation after confirming (PKCE-style links honour this;
+    // token_hash links go via the pending-invitation cookie set below).
+    const next = invitationToken ? routes.invitation(invitationToken) : routes.dashboard
+
     const supabase = await createClient()
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
-      options: {
-        emailRedirectTo: buildAuthCallbackUrl(publicEnv.NEXT_PUBLIC_APP_URL, routes.dashboard),
-      },
+      options: { emailRedirectTo: buildAuthCallbackUrl(publicEnv.NEXT_PUBLIC_APP_URL, next) },
     })
     if (error) throw toAuthAppError(error, "sign_up")
 
@@ -101,17 +140,33 @@ export async function signUp(_previous: SignUpState, formData: FormData): Promis
     // that already has an account, Supabase deliberately answers the same
     // way, so sign-up can't be used to discover who has an account.)
     const needsConfirmation = data.session === null
-    logger.info("auth.signed_up", { needsConfirmation })
+    logger.info("auth.signed_up", { needsConfirmation, invited: invitationToken !== null })
     if (!needsConfirmation && isHostedEnv(serverEnv.APP_ENV)) {
       // Hosted projects must require email confirmation (docs/ARCHITECTURE.md
       // "Deployment"). A session straight after sign-up means it's off.
       logger.error("security.email_confirmation_disabled", { appEnv: serverEnv.APP_ENV })
     }
-    return { needsConfirmation }
+    if (needsConfirmation && invitationToken) {
+      ;(await cookies()).set(PENDING_INVITATION_COOKIE, invitationToken, {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: publicEnv.NEXT_PUBLIC_APP_URL.startsWith("https://"),
+        path: "/",
+        maxAge: PENDING_INVITATION_MAX_AGE_SECONDS,
+      })
+    }
+    return { needsConfirmation, invitationToken }
   })
   if (!result.ok) return result
 
-  if (!result.data.needsConfirmation) redirect(routes.onboarding)
+  if (!result.data.needsConfirmation) {
+    // Invited people skip onboarding: accepting gives them a workspace.
+    redirect(
+      result.data.invitationToken
+        ? routes.invitation(result.data.invitationToken)
+        : routes.onboarding
+    )
+  }
   return ok({ email })
 }
 
@@ -138,12 +193,26 @@ export async function resendConfirmation(email: string): Promise<ActionResult<nu
 
 // --- Sign out ----------------------------------------------------------------
 
-export async function signOut(): Promise<void> {
+async function endThisSession() {
   const supabase = await createClient()
   // "local" ends this browser's session only; other devices stay signed in.
   const { error } = await supabase.auth.signOut({ scope: "local" })
   if (error) logger.warn("auth.sign_out_failed", { code: error.code, status: error.status })
+}
+
+export async function signOut(): Promise<void> {
+  await endThisSession()
   redirect(routes.login)
+}
+
+/**
+ * Signs out, then returns to a same-origin path: e.g. an invitation opened
+ * while signed in to a different account, so the right one can sign in.
+ */
+export async function signOutAndReturn(next: string): Promise<void> {
+  await endThisSession()
+  // getSafeRedirectPath only returns same-origin paths, so the cast is sound.
+  redirect(getSafeRedirectPath(next, routes.login) as Route)
 }
 
 // --- Forgot / reset password -------------------------------------------------

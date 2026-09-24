@@ -1,4 +1,5 @@
 import type { Instrumentation } from "next"
+import { redactInvitationPath } from "@/features/invitations/lib/tokens"
 import { reportError } from "@/lib/monitoring"
 
 /**
@@ -11,8 +12,9 @@ import { reportError } from "@/lib/monitoring"
  */
 export const onRequestError: Instrumentation.onRequestError = (error, request, context) => {
   reportError(error, {
-    // Drop the query string: it can carry auth codes and tokens.
-    path: request.path.split("?")[0],
+    // Drop the query string (auth codes, tokens) and hide invitation tokens,
+    // which live in the path (/invite/<token>).
+    path: redactInvitationPath(request.path.split("?")[0] ?? ""),
     method: request.method,
     routePath: context.routePath,
     routeType: context.routeType,

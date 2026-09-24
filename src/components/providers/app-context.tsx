@@ -21,8 +21,18 @@ export type AppContextValue = {
   user: CurrentUser
   /** The workspace in the URL. `workspace.id` scopes everything tenant-owned. */
   workspace: WorkspaceSummary
-  /** Every workspace the user belongs to (for switching). */
+  /**
+   * Workspaces for the switcher: every agency-level workspace the user belongs
+   * to, then their first client workspaces by name (capped; see moreClients).
+   */
   workspaces: WorkspaceSummary[]
+  /** More client workspaces exist than the switcher lists (see the Clients page). */
+  moreClients: boolean
+  /**
+   * The agency managing the current workspace, when it is a client and the
+   * user can see that agency (agency owners and admins). Null otherwise.
+   */
+  parentWorkspace: { name: string; slug: string } | null
 }
 
 const AppContext = createContext<AppContextValue | null>(null)

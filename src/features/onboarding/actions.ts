@@ -6,7 +6,7 @@ import { matchLocale } from "@/features/account/lib/locales"
 import { saveProfile } from "@/features/account/server/profile"
 import { requireUser } from "@/features/auth/server/session"
 import { createWorkspace } from "@/features/workspaces/server/mutations"
-import { listMyWorkspaces } from "@/features/workspaces/server/queries"
+import { getFirstWorkspace } from "@/features/workspaces/server/queries"
 import { validationFailed, type ActionFailure } from "@/lib/action-result"
 import { logger } from "@/lib/logger"
 import { runAction } from "@/lib/run-action"
@@ -42,7 +42,7 @@ export async function completeOnboarding(
 
   const result = await runAction("onboarding.complete", async () => {
     const user = await requireUser()
-    const [existing] = await listMyWorkspaces()
+    const existing = await getFirstWorkspace()
     if (existing) return existing.slug
 
     await saveProfile(user.id, {

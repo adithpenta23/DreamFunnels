@@ -4,14 +4,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { routes } from "@/config/routes"
 import { getCurrentProfile } from "@/features/account/server/profile"
 import { OnboardingForm } from "@/features/onboarding/components/onboarding-form"
-import { listMyWorkspaces } from "@/features/workspaces/server/queries"
+import { getFirstWorkspace } from "@/features/workspaces/server/queries"
 
 export const metadata: Metadata = { title: "Set up your workspace" }
 
 /** First run: shown until the user belongs to a workspace. */
 export default async function OnboardingPage() {
-  const [workspaces, profile] = await Promise.all([listMyWorkspaces(), getCurrentProfile()])
-  if (workspaces.length > 0) redirect(routes.dashboard)
+  const [workspace, profile] = await Promise.all([getFirstWorkspace(), getCurrentProfile()])
+  if (workspace) redirect(routes.dashboard)
 
   return (
     <Card>

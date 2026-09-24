@@ -39,6 +39,95 @@ export type Database = {
         }
         Relationships: []
       }
+      workspace_invitations: {
+        Row: {
+          accepted_at: string | null
+          accepted_by: string | null
+          created_at: string
+          delivery_status: string
+          email: string
+          expires_at: string
+          id: string
+          invited_by: string | null
+          last_message_id: string | null
+          last_sent_at: string | null
+          message: string | null
+          revoked_at: string | null
+          revoked_by: string | null
+          role: Database["public"]["Enums"]["workspace_role"]
+          token_hash: string
+          updated_at: string
+          workspace_id: string
+        }
+        Insert: {
+          accepted_at?: string | null
+          accepted_by?: string | null
+          created_at?: string
+          delivery_status?: string
+          email: string
+          expires_at: string
+          id?: string
+          invited_by?: string | null
+          last_message_id?: string | null
+          last_sent_at?: string | null
+          message?: string | null
+          revoked_at?: string | null
+          revoked_by?: string | null
+          role: Database["public"]["Enums"]["workspace_role"]
+          token_hash: string
+          updated_at?: string
+          workspace_id: string
+        }
+        Update: {
+          accepted_at?: string | null
+          accepted_by?: string | null
+          created_at?: string
+          delivery_status?: string
+          email?: string
+          expires_at?: string
+          id?: string
+          invited_by?: string | null
+          last_message_id?: string | null
+          last_sent_at?: string | null
+          message?: string | null
+          revoked_at?: string | null
+          revoked_by?: string | null
+          role?: Database["public"]["Enums"]["workspace_role"]
+          token_hash?: string
+          updated_at?: string
+          workspace_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "workspace_invitations_accepted_by_fkey"
+            columns: ["accepted_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "workspace_invitations_invited_by_fkey"
+            columns: ["invited_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "workspace_invitations_revoked_by_fkey"
+            columns: ["revoked_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "workspace_invitations_workspace_id_fkey"
+            columns: ["workspace_id"]
+            isOneToOne: false
+            referencedRelation: "workspaces"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       workspace_members: {
         Row: {
           created_at: string
@@ -101,7 +190,10 @@ export type Database = {
           slug: string
           timezone: string
           updated_at: string
+          website_url: string | null
           workspace_type: Database["public"]["Enums"]["workspace_type"]
+          member_count: number | null
+          pending_invitation_count: number | null
           viewer_role: Database["public"]["Enums"]["workspace_role"] | null
         }
         Insert: {
@@ -126,6 +218,7 @@ export type Database = {
           slug: string
           timezone?: string
           updated_at?: string
+          website_url?: string | null
           workspace_type?: Database["public"]["Enums"]["workspace_type"]
         }
         Update: {
@@ -150,6 +243,7 @@ export type Database = {
           slug?: string
           timezone?: string
           updated_at?: string
+          website_url?: string | null
           workspace_type?: Database["public"]["Enums"]["workspace_type"]
         }
         Relationships: [
@@ -174,6 +268,62 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      accept_workspace_invitation: {
+        Args: { p_token_hash: string }
+        Returns: {
+          outcome: string
+          workspace_slug: string
+        }[]
+      }
+      create_client_workspace: {
+        Args: {
+          p_address_city?: string
+          p_address_country?: string
+          p_address_line1?: string
+          p_address_line2?: string
+          p_address_postal_code?: string
+          p_address_region?: string
+          p_agency_id: string
+          p_business_email?: string
+          p_business_name?: string
+          p_business_phone?: string
+          p_name: string
+          p_slug?: string
+          p_timezone?: string
+          p_website_url?: string
+        }
+        Returns: {
+          address_city: string | null
+          address_country: string | null
+          address_line1: string | null
+          address_line2: string | null
+          address_postal_code: string | null
+          address_region: string | null
+          brand_primary_color: string | null
+          brand_secondary_color: string | null
+          business_email: string | null
+          business_name: string | null
+          business_phone: string | null
+          created_at: string
+          created_by: string | null
+          id: string
+          logo_url: string | null
+          name: string
+          parent_workspace_id: string | null
+          parent_workspace_type: Database["public"]["Enums"]["workspace_type"] | null
+          slug: string
+          timezone: string
+          updated_at: string
+          website_url: string | null
+          workspace_type: Database["public"]["Enums"]["workspace_type"]
+        }
+        SetofOptions: {
+          from: "*"
+          to: "workspaces"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       create_workspace: {
         Args: { p_name: string; p_slug?: string; p_timezone?: string }
         Returns: {
@@ -198,6 +348,7 @@ export type Database = {
           slug: string
           timezone: string
           updated_at: string
+          website_url: string | null
           workspace_type: Database["public"]["Enums"]["workspace_type"]
         }
         SetofOptions: {
@@ -207,12 +358,77 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      create_workspace_invitation: {
+        Args: {
+          p_email: string
+          p_message?: string
+          p_role: Database["public"]["Enums"]["workspace_role"]
+          p_token_hash: string
+          p_workspace_id: string
+        }
+        Returns: {
+          invitation_expires_at: string
+          invitation_id: string
+          outcome: string
+        }[]
+      }
+      get_workspace_invitation: {
+        Args: { p_token_hash: string }
+        Returns: {
+          email: string
+          expires_at: string
+          inviter_name: string
+          role: Database["public"]["Enums"]["workspace_role"]
+          status: string
+          workspace_name: string
+          workspace_slug: string
+        }[]
+      }
+      member_count: {
+        Args: { "": Database["public"]["Tables"]["workspaces"]["Row"] }
+        Returns: {
+          error: true
+        } & "the function public.member_count with parameter or with a single unnamed json/jsonb parameter, but no matches were found in the schema cache"
+      }
+      pending_invitation_count: {
+        Args: { "": Database["public"]["Tables"]["workspaces"]["Row"] }
+        Returns: {
+          error: true
+        } & "the function public.pending_invitation_count with parameter or with a single unnamed json/jsonb parameter, but no matches were found in the schema cache"
+      }
       rate_limit_hit: {
         Args: { p_key: string; p_window_seconds: number }
         Returns: {
           hits: number
           window_ends_at: string
         }[]
+      }
+      record_workspace_invitation_delivery: {
+        Args: {
+          p_delivered: boolean
+          p_invitation_id: string
+          p_message_id?: string
+          p_token_hash: string
+        }
+        Returns: undefined
+      }
+      resend_workspace_invitation: {
+        Args: {
+          p_invitation_id: string
+          p_token_hash: string
+          p_workspace_id: string
+        }
+        Returns: {
+          invitation_email: string
+          invitation_expires_at: string
+          invitation_message: string
+          invitation_role: Database["public"]["Enums"]["workspace_role"]
+          outcome: string
+        }[]
+      }
+      revoke_workspace_invitation: {
+        Args: { p_invitation_id: string; p_workspace_id: string }
+        Returns: string
       }
       viewer_role: {
         Args: { "": Database["public"]["Tables"]["workspaces"]["Row"] }

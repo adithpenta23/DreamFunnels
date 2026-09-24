@@ -16,6 +16,7 @@ const emptyProfile: WorkspaceProfile = {
   businessName: null,
   businessEmail: null,
   businessPhone: null,
+  websiteUrl: null,
   addressLine1: null,
   addressLine2: null,
   addressCity: null,
@@ -116,10 +117,12 @@ describe("WorkspaceProfileForm", () => {
     expect(formData?.get("timezone")).toBe("UTC")
     expect(formData?.get("addressCity")).toBe("Austin")
 
+    // The toast fires inside the action, before React commits the result:
+    // wait for the idle button (not "Saving…") before checking the form.
+    expect(await screen.findByRole("button", { name: "Save business profile" })).toBeDisabled()
     // The normalised values replace what was typed, and the form is clean again.
     expect(screen.getByLabelText("Phone")).toHaveValue("+15125550100")
     expect(screen.getByLabelText("Primary color")).toHaveValue("#1d4ed8")
-    expect(save()).toBeDisabled()
   })
 
   it("shows field errors next to their fields and keeps what was typed", async () => {

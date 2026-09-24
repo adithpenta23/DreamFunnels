@@ -81,6 +81,44 @@ describe("parseServerEnv", () => {
       expect(attempt).toThrow(/TURNSTILE_SECRET_KEY/)
     }
   )
+
+  describe("transactional email", () => {
+    it("needs nothing locally: Mailpit is the default", () => {
+      const env = parseServerEnv({})
+      expect(env.EMAIL_PROVIDER).toBeUndefined()
+      expect(env.RESEND_API_KEY).toBeUndefined()
+    })
+
+    it("requires an API key and a sender to use Resend, even locally", () => {
+      const attempt = () => parseServerEnv({ EMAIL_PROVIDER: "resend" })
+      expect(attempt).toThrow(/RESEND_API_KEY: Required when EMAIL_PROVIDER=resend/)
+      expect(attempt).toThrow(/EMAIL_FROM_ADDRESS: Required when EMAIL_PROVIDER=resend/)
+    })
+
+    it.each(["staging", "production"])(
+      "requires Resend in %s (Mailpit only catches mail)",
+      (appEnv) => {
+        expect(() => parseServerEnv({ APP_ENV: appEnv })).toThrow(
+          /EMAIL_PROVIDER: Set it to "resend"/
+        )
+        expect(() => parseServerEnv({ APP_ENV: appEnv, EMAIL_PROVIDER: "mailpit" })).toThrow(
+          /EMAIL_PROVIDER/
+        )
+      }
+    )
+
+    it("rejects unknown providers, malformed senders and header-breaking names", () => {
+      expect(() => parseServerEnv({ EMAIL_PROVIDER: "smtp" })).toThrow(/EMAIL_PROVIDER/)
+      expect(() => parseServerEnv({ EMAIL_FROM_ADDRESS: "not-an-email" })).toThrow(
+        /EMAIL_FROM_ADDRESS/
+      )
+      expect(() => parseServerEnv({ EMAIL_FROM_NAME: "Evil\r\nBcc: x@y.z" })).toThrow(
+        /EMAIL_FROM_NAME/
+      )
+      expect(() => parseServerEnv({ EMAIL_FROM_NAME: 'Acme "Support"' })).toThrow(/EMAIL_FROM_NAME/)
+      expect(parseServerEnv({ EMAIL_FROM_NAME: "Acme, Inc." }).EMAIL_FROM_NAME).toBe("Acme, Inc.")
+    })
+  })
 })
 
 describe("parseDeploymentEnv", () => {
@@ -91,6 +129,9 @@ describe("parseDeploymentEnv", () => {
     NEXT_PUBLIC_TURNSTILE_SITE_KEY: "0x4AAAAAAAexample",
     SUPABASE_SECRET_KEY: "sb_secret_test",
     TURNSTILE_SECRET_KEY: "0x4AAAAAAAexample-secret",
+    EMAIL_PROVIDER: "resend",
+    RESEND_API_KEY: "re_test_key",
+    EMAIL_FROM_ADDRESS: "no-reply@mail.dreamfunnels.example",
   }
   const issuesOf = (raw: Record<string, string | undefined>) => {
     try {
@@ -149,6 +190,25 @@ describe("parseDeploymentEnv", () => {
     expect(production).toMatch(/NEXT_PUBLIC_TURNSTILE_SITE_KEY: Cloudflare's test site key/)
   })
 
+  it("allows Resend's testing sender in staging but not in production", () => {
+    const testSender = { ...hosted, EMAIL_FROM_ADDRESS: "onboarding@resend.dev" }
+    expect(issuesOf({ ...testSender, APP_ENV: "staging" })).toEqual([])
+    expect(issuesOf({ ...testSender, APP_ENV: "production" }).join()).toMatch(
+      /EMAIL_FROM_ADDRESS: resend.dev only delivers/
+    )
+  })
+
+  it("lists missing email settings with the rest", () => {
+    const {
+      EMAIL_PROVIDER: _p,
+      RESEND_API_KEY: _k,
+      EMAIL_FROM_ADDRESS: _f,
+      ...withoutEmail
+    } = hosted
+    const issues = issuesOf({ ...withoutEmail, APP_ENV: "production" }).join("\n")
+    expect(issues).toMatch(/EMAIL_PROVIDER/)
+  })
+
   it("never echoes secret values", () => {
     const secret = "sb_secret_do_not_print_me"
     const issues = issuesOf({
@@ -156,9 +216,12 @@ describe("parseDeploymentEnv", () => {
       APP_ENV: "production",
       SUPABASE_SECRET_KEY: secret,
       TURNSTILE_SECRET_KEY: "1x0000000000000000000000000000000AA",
+      RESEND_API_KEY: "re_do_not_print_me",
+      EMAIL_FROM_ADDRESS: "onboarding@resend.dev",
     })
     expect(issues.length).toBeGreaterThan(0)
     expect(issues.join()).not.toContain(secret)
     expect(issues.join()).not.toContain("1x0000000000000000000000000000000AA")
+    expect(issues.join()).not.toContain("re_do_not_print_me")
   })
 })

@@ -28,6 +28,16 @@ export const isHostedEnv = (appEnv: AppEnv): boolean => appEnv !== "local"
  */
 const TURNSTILE_TEST_KEY = /^[123]x0{10,}/
 
+/**
+ * Transactional email transports. `mailpit` is the local stack's mail catcher
+ * (development, tests, CI); `resend` sends for real and is required when hosted.
+ */
+export const EMAIL_PROVIDERS = ["mailpit", "resend"] as const
+export type EmailProviderName = (typeof EMAIL_PROVIDERS)[number]
+
+/** Resend's shared onboarding domain only delivers to the account's own address. */
+const RESEND_TEST_SENDER = /@resend\.dev$/i
+
 export const publicEnvSchema = z.object({
   NEXT_PUBLIC_APP_URL: z.url(),
   NEXT_PUBLIC_SUPABASE_URL: z.url(),
@@ -54,6 +64,20 @@ export const serverEnvSchema = z
     /** Cloudflare Turnstile secret. Required when hosted; unset locally disables the CAPTCHA. */
     TURNSTILE_SECRET_KEY: z.string().min(1).optional(),
     SENTRY_AUTH_TOKEN: z.string().min(1).optional(),
+    /** How transactional email is sent. Defaults to `mailpit` locally; must be `resend` when hosted. */
+    EMAIL_PROVIDER: z.enum(EMAIL_PROVIDERS).optional(),
+    /** Sender address (on a domain verified with the provider). Required when hosted. */
+    EMAIL_FROM_ADDRESS: z.email().max(254).optional(),
+    /** Sender display name. Defaults to the product name. */
+    EMAIL_FROM_NAME: z
+      .string()
+      .max(80)
+      .regex(/^[^\r\n<>"]+$/, { error: "Must not contain line breaks, quotes or angle brackets." })
+      .optional(),
+    /** Resend API key (re_…), sending access only. Required with EMAIL_PROVIDER=resend. */
+    RESEND_API_KEY: z.string().min(1).optional(),
+    /** Mailpit's web/API address. Defaults to the local stack's (http://127.0.0.1:54324). */
+    MAILPIT_URL: z.url().optional(),
   })
   .superRefine((env, ctx) => {
     const issue = (path: string, message: string) =>
@@ -68,7 +92,30 @@ export const serverEnvSchema = z
         `Set it to "staging" or "production" for Vercel ${env.VERCEL_ENV} deployments.`
       )
     }
+    if (env.EMAIL_PROVIDER === "resend") {
+      if (!env.RESEND_API_KEY) issue("RESEND_API_KEY", "Required when EMAIL_PROVIDER=resend.")
+      if (!env.EMAIL_FROM_ADDRESS) {
+        issue("EMAIL_FROM_ADDRESS", "Required when EMAIL_PROVIDER=resend.")
+      }
+    }
     if (!isHostedEnv(env.APP_ENV)) return
+
+    if (env.EMAIL_PROVIDER !== "resend") {
+      issue(
+        "EMAIL_PROVIDER",
+        `Set it to "resend" when APP_ENV=${env.APP_ENV} (Mailpit only catches mail locally).`
+      )
+    }
+    if (
+      env.APP_ENV === "production" &&
+      env.EMAIL_FROM_ADDRESS &&
+      RESEND_TEST_SENDER.test(env.EMAIL_FROM_ADDRESS)
+    ) {
+      issue(
+        "EMAIL_FROM_ADDRESS",
+        "resend.dev only delivers to your own account; use an address on your verified domain."
+      )
+    }
 
     if (!env.SUPABASE_SECRET_KEY) {
       issue("SUPABASE_SECRET_KEY", `Required when APP_ENV=${env.APP_ENV} (auth rate limiting).`)

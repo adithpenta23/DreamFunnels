@@ -8,6 +8,8 @@ export const acmeWorkspace: WorkspaceSummary = {
   name: "Acme Rockets",
   slug: "acme",
   role: "owner",
+  type: "agency",
+  parentId: null,
   createdAt: "2026-09-18T10:00:00.000Z",
 }
 
@@ -16,6 +18,8 @@ export const betaWorkspace: WorkspaceSummary = {
   name: "Beta Labs",
   slug: "beta-labs",
   role: "member",
+  type: "agency",
+  parentId: null,
   createdAt: "2026-09-18T11:00:00.000Z",
 }
 
@@ -23,4 +27,6 @@ export const appContext: AppContextValue = {
   user: { id: "u-1", email: "ada@example.com", fullName: "Ada Lovelace" },
   workspace: acmeWorkspace,
   workspaces: [acmeWorkspace, betaWorkspace],
+  moreClients: false,
+  parentWorkspace: null,
 }

@@ -2,6 +2,7 @@ import { z } from "zod"
 import { isCountryCode } from "@/lib/countries"
 import { optionalPhoneSchema } from "@/lib/phone"
 import { timezoneSchema } from "@/lib/timezones"
+import { ASSIGNABLE_MEMBER_ROLES } from "./lib/members"
 import { WORKSPACE_SLUG_PATTERN, isReservedWorkspaceSlug } from "./lib/slug"
 
 /**
@@ -90,19 +91,35 @@ const hexColor = z
   .regex(/^#?[0-9a-fA-F]{6}$/, { error: "Use a hex color like #1D4ED8." })
   .transform((value) => `#${value.replace(/^#/, "").toLowerCase()}`)
 
-export const updateWorkspaceProfileSchema = z.object({
-  // Identifies the workspace only; access is re-checked on the server.
-  workspaceId: z.uuid({ error: "Unknown workspace." }),
+/** A site address; "abcroofing.com" is read as https://abcroofing.com. */
+const websiteUrl = z
+  .string()
+  .transform((value) => (/^[a-z][a-z0-9+.-]*:/i.test(value) ? value : `https://${value}`))
+  .pipe(
+    z
+      .url({
+        protocol: /^https?$/,
+        error: "Enter a website address like https://yourbusiness.com.",
+      })
+      .max(2048, { error: "That link is too long." })
+      .regex(/^\S+$/, { error: "A link can't contain spaces." })
+  )
+
+const optionalEmail = optional(
+  z
+    .string()
+    .max(254, { error: "That email address is too long." })
+    .toLowerCase()
+    .pipe(z.email({ error: "Enter a valid email address." }))
+)
+
+/** How customers reach the business. Shared by the profile form and "Add client". */
+const businessContactFields = {
   timezone: timezoneSchema,
   businessName: optionalText(120),
-  businessEmail: optional(
-    z
-      .string()
-      .max(254, { error: "That email address is too long." })
-      .toLowerCase()
-      .pipe(z.email({ error: "Enter a valid email address." }))
-  ),
+  businessEmail: optionalEmail,
   businessPhone: optionalPhoneSchema,
+  websiteUrl: optional(websiteUrl),
   addressLine1: optionalText(200),
   addressLine2: optionalText(200),
   addressCity: optionalText(100),
@@ -111,6 +128,12 @@ export const updateWorkspaceProfileSchema = z.object({
   addressCountry: optional(
     z.string().toUpperCase().refine(isCountryCode, { error: "Choose a country from the list." })
   ),
+}
+
+export const updateWorkspaceProfileSchema = z.object({
+  // Identifies the workspace only; access is re-checked on the server.
+  workspaceId: z.uuid({ error: "Unknown workspace." }),
+  ...businessContactFields,
   logoUrl: optional(
     z
       .url({ protocol: /^https$/, error: "Enter a full https:// link to an image." })
@@ -122,3 +145,58 @@ export const updateWorkspaceProfileSchema = z.object({
 })
 
 export type UpdateWorkspaceProfileInput = z.infer<typeof updateWorkspaceProfileSchema>
+
+// --- Clients and members ---------------------------------------------------------
+
+/**
+ * "Add client": the business, its workspace, and optionally who to invite.
+ * The workspace name defaults to the business name (cut to 80 characters).
+ * The agency id is a reference only: the database checks the caller runs it.
+ */
+export const createClientSchema = z
+  .object({
+    agencyId: z.uuid({ error: "Unknown workspace." }),
+    ...businessContactFields,
+    businessName: z
+      .string({ error: "Enter the business name." })
+      .trim()
+      .min(1, { error: "Enter the business name." })
+      .max(120, { error: "Use 120 characters or fewer." }),
+    workspaceName: z.preprocess(
+      (value) =>
+        value === null || (typeof value === "string" && value.trim() === "") ? undefined : value,
+      workspaceNameSchema.optional()
+    ),
+    workspaceSlug: optionalWorkspaceSlugSchema,
+    /** Optional: invite the client's owner or contact in the same step. */
+    ownerEmail: optionalEmail,
+    ownerRole: z.enum(ASSIGNABLE_MEMBER_ROLES, { error: "Choose a role." }).default("admin"),
+  })
+  .transform(({ workspaceName, ...client }) => ({
+    ...client,
+    workspaceName: workspaceName ?? client.businessName.slice(0, 80).trim(),
+  }))
+
+export type CreateClientInput = z.infer<typeof createClientSchema>
+
+/** Which member of which workspace; both are re-checked on the server. */
+export const memberRefSchema = z.object({
+  workspaceId: z.uuid({ error: "Unknown workspace." }),
+  userId: z.uuid({ error: "Unknown member." }),
+})
+
+export const changeMemberRoleSchema = memberRefSchema.extend({
+  role: z.enum(ASSIGNABLE_MEMBER_ROLES, { error: "Choose member or admin." }),
+})
+
+/** The Clients page URL state: `?q=` search and `?page=`. Bad values fall back. */
+export const clientListParamsSchema = z.object({
+  q: z
+    .string()
+    .trim()
+    .max(80)
+    .optional()
+    .catch(undefined)
+    .transform((value) => value || undefined),
+  page: z.coerce.number().int().min(1).max(10_000).catch(1).default(1),
+})

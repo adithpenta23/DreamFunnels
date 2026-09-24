@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
+  clientListParamsSchema,
+  createClientSchema,
   createWorkspaceSchema,
   updateWorkspaceProfileSchema,
   updateWorkspaceSchema,
@@ -99,6 +101,7 @@ describe("updateWorkspaceProfileSchema", () => {
     businessName: "",
     businessEmail: "",
     businessPhone: "",
+    websiteUrl: "",
     addressLine1: "",
     addressLine2: "",
     addressCity: "",
@@ -166,5 +169,97 @@ describe("updateWorkspaceProfileSchema", () => {
     expect(result.success).toBe(false)
     expect(result.error?.issues[0]?.path).toEqual([field])
     expect(result.error?.issues[0]?.message).toMatch(message)
+  })
+})
+
+describe("createClientSchema", () => {
+  const agencyId = "6f1c1d0e-1a2b-4c3d-8e9f-0a1b2c3d4e5f"
+  const minimal = { agencyId, businessName: "ABC Roofing LLC", timezone: "America/Chicago" }
+
+  it("needs only a business name and time zone; the workspace is named after the business", () => {
+    const parsed = createClientSchema.parse(minimal)
+    expect(parsed).toMatchObject({
+      agencyId,
+      businessName: "ABC Roofing LLC",
+      workspaceName: "ABC Roofing LLC",
+      timezone: "America/Chicago",
+      businessEmail: null,
+      websiteUrl: null,
+      ownerEmail: null,
+      ownerRole: "admin",
+    })
+    // No URL chosen: the database generates one.
+    expect(parsed.workspaceSlug).toBeUndefined()
+  })
+
+  it("cuts a long business name to fit the workspace name", () => {
+    const parsed = createClientSchema.parse({ ...minimal, businessName: "B".repeat(120) })
+    expect(parsed.workspaceName).toHaveLength(80)
+  })
+
+  it("keeps a chosen workspace name and URL", () => {
+    const parsed = createClientSchema.parse({
+      ...minimal,
+      workspaceName: "ABC (Austin)",
+      workspaceSlug: " ABC-Austin ",
+    })
+    expect(parsed.workspaceName).toBe("ABC (Austin)")
+    expect(parsed.workspaceSlug).toBe("abc-austin")
+  })
+
+  it("requires the business name, and validates the rest like the business profile", () => {
+    const result = createClientSchema.safeParse({
+      agencyId,
+      businessName: "  ",
+      timezone: "-05:00",
+      businessPhone: "555-0100",
+      ownerEmail: "not-an-email",
+      ownerRole: "owner",
+    })
+    const fields = result.error?.issues.map((issue) => issue.path[0])
+    expect(fields).toEqual(
+      expect.arrayContaining([
+        "businessName",
+        "timezone",
+        "businessPhone",
+        "ownerEmail",
+        "ownerRole",
+      ])
+    )
+  })
+
+  it("normalises the invitee's address", () => {
+    expect(
+      createClientSchema.parse({ ...minimal, ownerEmail: " Owner@ABC.example " }).ownerEmail
+    ).toBe("owner@abc.example")
+  })
+})
+
+describe("website addresses", () => {
+  const parseWebsite = (websiteUrl: string) =>
+    updateWorkspaceProfileSchema.safeParse({ workspaceId, timezone: "UTC", websiteUrl })
+
+  it("accepts http and https, and reads a bare domain as https", () => {
+    expect(parseWebsite("abcroofing.com").data?.websiteUrl).toBe("https://abcroofing.com")
+    expect(parseWebsite("http://abcroofing.com").data?.websiteUrl).toBe("http://abcroofing.com")
+    expect(parseWebsite("").data?.websiteUrl).toBeNull()
+  })
+
+  it("rejects other schemes and anything with spaces", () => {
+    expect(parseWebsite("javascript:alert(1)").success).toBe(false)
+    expect(parseWebsite("ftp://files.example.com").success).toBe(false)
+    expect(parseWebsite("https://abc roofing.com").success).toBe(false)
+  })
+})
+
+describe("clientListParamsSchema", () => {
+  it("reads the search and page from the URL, falling back on nonsense", () => {
+    expect(clientListParamsSchema.parse({})).toEqual({ q: undefined, page: 1 })
+    expect(clientListParamsSchema.parse({ q: " roof ", page: "3" })).toEqual({ q: "roof", page: 3 })
+    expect(clientListParamsSchema.parse({ q: ["a", "b"], page: "-1" })).toEqual({
+      q: undefined,
+      page: 1,
+    })
+    expect(clientListParamsSchema.parse({ page: "abc" }).page).toBe(1)
   })
 })

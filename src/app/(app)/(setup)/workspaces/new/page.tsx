@@ -11,14 +11,13 @@ import {
 } from "@/components/ui/card"
 import { routes } from "@/config/routes"
 import { CreateWorkspaceForm } from "@/features/workspaces/components/create-workspace-form"
-import { listMyWorkspaces } from "@/features/workspaces/server/queries"
+import { getFirstWorkspace } from "@/features/workspaces/server/queries"
 
 export const metadata: Metadata = { title: "Create a workspace" }
 
 export default async function NewWorkspacePage() {
-  const workspaces = await listMyWorkspaces()
   // The first workspace is created during onboarding, together with the profile.
-  if (workspaces.length === 0) redirect(routes.onboarding)
+  if (!(await getFirstWorkspace())) redirect(routes.onboarding)
 
   return (
     <Card>
