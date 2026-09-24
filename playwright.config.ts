@@ -1,10 +1,19 @@
 import { existsSync } from "node:fs"
 import { defineConfig, devices } from "@playwright/test"
+import { localTargetProblems } from "./e2e/support/targets"
 
 // Give the test process the same configuration as the app (Supabase URL and
 // keys for e2e/support). Values already in the environment (CI) win.
 for (const file of [".env.local", ".env"]) {
   if (existsSync(file)) process.loadEnvFile(file)
+}
+
+// These suites create and delete users and workspaces with the secret key:
+// refuse anything but this machine's app and Supabase stack, before any test
+// runs. Staging has its own suite and config (playwright.staging.config.ts).
+const targetProblems = localTargetProblems(process.env)
+if (targetProblems.length > 0) {
+  throw new Error(`Refusing to run the local E2E suites:\n- ${targetProblems.join("\n- ")}`)
 }
 
 const PORT = Number(process.env.PORT ?? 3000)
@@ -16,16 +25,23 @@ const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://localhost:${PORT}`
 const isCI = Boolean(process.env.CI)
 
 /**
- * E2E tests run against a real Next server.
+ * E2E tests run against a real Next server on this machine.
  * - CI: `npm run build` first; Playwright then starts `next start`.
  * - Local: starts `next dev`, or reuses a server already on the port.
- * - PLAYWRIGHT_BASE_URL: test an existing deployment (e.g. a Vercel preview).
  *
- * e2e/smoke.spec.ts needs nothing else. e2e/auth.spec.ts needs Supabase
- * (`npm run db:start`); it skips without one unless E2E_REQUIRE_SUPABASE=1.
+ * Projects:
+ * - `chromium` (`npm run test:e2e`): e2e/*.spec.ts. smoke.spec.ts needs
+ *   nothing else; the rest need the local Supabase stack (`npm run db:start`)
+ *   with email confirmation OFF (supabase/config.toml), and skip without one
+ *   unless E2E_REQUIRE_SUPABASE=1.
+ * - `confirmation` (`npm run test:e2e:confirmation`): e2e/confirmation/, the
+ *   journeys that need email confirmation ON, reading links from Mailpit. CI
+ *   starts a stack with confirmation on for them (scripts/ci/); against a
+ *   stack without it they skip, or fail with E2E_REQUIRE_EMAIL_CONFIRMATION=1.
  */
 export default defineConfig({
   testDir: "./e2e",
+  testMatch: "**/*.spec.ts",
   fullyParallel: true,
   forbidOnly: isCI,
   retries: isCI ? 2 : 0,
@@ -43,7 +59,18 @@ export default defineConfig({
     extraHTTPHeaders: { "x-forwarded-for": workerClientIp },
     screenshot: "only-on-failure",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    {
+      name: "chromium",
+      testIgnore: "confirmation/**",
+      use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      name: "confirmation",
+      testDir: "./e2e/confirmation",
+      use: { ...devices["Desktop Chrome"] },
+    },
+  ],
   webServer: process.env.PLAYWRIGHT_BASE_URL
     ? undefined
     : {

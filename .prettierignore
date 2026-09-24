@@ -7,5 +7,7 @@ build
 coverage
 playwright-report
 test-results
+playwright-report-staging
+test-results-staging
 supabase/.temp
 supabase/.branches

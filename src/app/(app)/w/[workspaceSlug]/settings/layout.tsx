@@ -1,5 +1,6 @@
 import { PageHeader } from "@/components/layout/page-header"
 import { SettingsNav } from "@/components/layout/settings-nav"
+import { canManageMembers } from "@/features/workspaces/lib/members"
 import { requireWorkspaceMember } from "@/features/workspaces/server/queries"
 
 export default async function SettingsLayout({
@@ -12,7 +13,7 @@ export default async function SettingsLayout({
   return (
     <div className="space-y-6">
       <PageHeader title="Settings" description={`Manage ${workspace.name} and your account.`} />
-      <SettingsNav workspaceSlug={workspace.slug} />
+      <SettingsNav workspaceSlug={workspace.slug} showAuditLog={canManageMembers(workspace.role)} />
       {children}
     </div>
   )

@@ -275,6 +275,13 @@ export type Database = {
           workspace_slug: string
         }[]
       }
+      accept_workspace_invitation_by_id: {
+        Args: { p_invitation_id: string }
+        Returns: {
+          outcome: string
+          workspace_slug: string
+        }[]
+      }
       create_client_workspace: {
         Args: {
           p_address_city?: string
@@ -384,6 +391,41 @@ export type Database = {
           workspace_slug: string
         }[]
       }
+      list_my_pending_invitations: {
+        Args: never
+        Returns: {
+          created_at: string
+          expires_at: string
+          invitation_id: string
+          inviter_name: string
+          role: Database["public"]["Enums"]["workspace_role"]
+          workspace_name: string
+        }[]
+      }
+      list_workspace_audit_events: {
+        Args: {
+          p_actor_id?: string
+          p_before_id?: number
+          p_event_type?: string
+          p_from?: string
+          p_limit?: number
+          p_to?: string
+          p_workspace_id: string
+        }
+        Returns: {
+          actor_name: string
+          created_at: string
+          details: Json
+          event_type: string
+          id: number
+          target_email: string
+          target_name: string
+        }[]
+      }
+      make_workspace_owner: {
+        Args: { p_user_id: string; p_workspace_id: string }
+        Returns: string
+      }
       member_count: {
         Args: { "": Database["public"]["Tables"]["workspaces"]["Row"] }
         Returns: {
@@ -428,6 +470,10 @@ export type Database = {
       }
       revoke_workspace_invitation: {
         Args: { p_invitation_id: string; p_workspace_id: string }
+        Returns: string
+      }
+      transfer_workspace_ownership: {
+        Args: { p_new_owner_id: string; p_workspace_id: string }
         Returns: string
       }
       viewer_role: {

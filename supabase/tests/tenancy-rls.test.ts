@@ -468,12 +468,20 @@ describe("workspace roles", () => {
       )
     ).rejects.toThrow(/at least one owner/)
 
-    // With a second owner in place, the original owner may step down.
-    await db.asUser(t.owner, (tx) =>
-      tx.query(
-        "update public.workspace_members set role = 'owner' where workspace_id = $1 and user_id = $2",
-        [t.workspaceId, t.admin]
+    // With a second owner in place (Sprint 4: granted by transfer, never by a
+    // direct update), the original owner may step down.
+    await expect(
+      db.asUser(t.owner, (tx) =>
+        tx.query(
+          "update public.workspace_members set role = 'owner' where workspace_id = $1 and user_id = $2",
+          [t.workspaceId, t.admin]
+        )
       )
+    ).rejects.toThrow(/row-level security/)
+    // Fixture shortcut (trusted), so the original owner is still an owner here.
+    await db.admin.query(
+      "update public.workspace_members set role = 'owner' where workspace_id = $1 and user_id = $2",
+      [t.workspaceId, t.admin]
     )
     const leave = await db.asUser(t.owner, (tx) =>
       tx.query("delete from public.workspace_members where workspace_id = $1 and user_id = $2", [

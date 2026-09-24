@@ -1,11 +1,19 @@
 import { describe, expect, it } from "vitest"
 import { isAppError, toPublicError } from "@/lib/errors"
-import { isLastOwnerViolation, toMemberWriteError } from "./member-errors"
+import {
+  isLastOwnerViolation,
+  ownershipRefusalError,
+  toLeaveError,
+  toMemberWriteError,
+  toOwnershipWriteError,
+} from "./member-errors"
 import {
   canManageClients,
   canManageMembers,
   clientsHomeSlug,
+  leavePolicy,
   memberActionsFor,
+  ownershipActionsFor,
   roleDescription,
 } from "./members"
 import type { WorkspaceRole } from "./roles"
@@ -128,5 +136,160 @@ describe("toMemberWriteError", () => {
     const error = toMemberWriteError({ code: "P0001", message: "something else" })
     expect(isAppError(error) && error.code).toBe("INTERNAL")
     expect(toPublicError(error).message).not.toContain("something else")
+  })
+})
+
+describe("ownershipActionsFor", () => {
+  const viewer = (role: WorkspaceRole, directRole: WorkspaceRole | null = role) => ({
+    userId: "viewer",
+    role,
+    directRole,
+  })
+
+  it("lets a direct owner transfer to non-owners, in agencies and clients", () => {
+    for (const role of ["member", "admin"] as const) {
+      expect(ownershipActionsFor(viewer("owner"), them(role), "agency")).toEqual({
+        canTransferOwnership: true,
+        canMakeOwner: false,
+      })
+      expect(ownershipActionsFor(viewer("owner"), them(role), "client")).toEqual({
+        canTransferOwnership: true,
+        canMakeOwner: true,
+      })
+    }
+  })
+
+  it("gives an inherited (agency) owner make-owner in clients, but nothing to transfer", () => {
+    expect(ownershipActionsFor(viewer("owner", null), them("member"), "client")).toEqual({
+      canTransferOwnership: false,
+      canMakeOwner: true,
+    })
+    // An agency admin who's also a client owner-by-inheritance doesn't exist; an
+    // agency owner with a lower direct role still can't transfer.
+    expect(ownershipActionsFor(viewer("owner", "admin"), them("member"), "client")).toEqual({
+      canTransferOwnership: false,
+      canMakeOwner: true,
+    })
+  })
+
+  it("gives admins and members nothing, anywhere", () => {
+    for (const role of ["member", "admin"] as const) {
+      for (const type of ["agency", "client"] as const) {
+        expect(ownershipActionsFor(viewer(role), them("member"), type)).toEqual({
+          canTransferOwnership: false,
+          canMakeOwner: false,
+        })
+      }
+    }
+  })
+
+  it("never targets yourself or an existing owner", () => {
+    expect(
+      ownershipActionsFor(viewer("owner"), { userId: "viewer", role: "owner" }, "client")
+    ).toEqual({ canTransferOwnership: false, canMakeOwner: false })
+    expect(ownershipActionsFor(viewer("owner"), them("owner"), "client")).toEqual({
+      canTransferOwnership: false,
+      canMakeOwner: false,
+    })
+  })
+})
+
+describe("leavePolicy", () => {
+  const base = {
+    workspaceName: "ABC Roofing",
+    workspaceType: "agency" as const,
+    directRole: "member" as WorkspaceRole | null,
+    directOwnerCount: 1,
+    agency: null as { name: string; role: WorkspaceRole } | null,
+  }
+
+  it("lets members and admins leave, and says they lose access", () => {
+    for (const directRole of ["member", "admin"] as const) {
+      const policy = leavePolicy({ ...base, directRole })
+      expect(policy).toEqual({ canLeave: true, impact: "You'll lose access to this workspace." })
+    }
+  })
+
+  it("lets an owner leave when another direct owner remains", () => {
+    const policy = leavePolicy({ ...base, directRole: "owner", directOwnerCount: 2 })
+    expect(policy.canLeave).toBe(true)
+    expect(policy.canLeave && policy.impact).toMatch(/other owners keep managing it/)
+  })
+
+  it("refuses an agency's last owner and suggests transferring first", () => {
+    const policy = leavePolicy({ ...base, directRole: "owner", directOwnerCount: 1 })
+    expect(policy).toMatchObject({ canLeave: false, reason: "last_owner" })
+    expect(!policy.canLeave && policy.explanation).toMatch(/Transfer ownership/)
+  })
+
+  it("lets a client's last direct owner leave: the agency's owners keep it", () => {
+    const policy = leavePolicy({
+      ...base,
+      workspaceType: "client",
+      directRole: "owner",
+      directOwnerCount: 1,
+      agency: null,
+    })
+    expect(policy.canLeave).toBe(true)
+    expect(policy.canLeave && policy.impact).toMatch(/agency that manages it will keep ownership/)
+    const named = leavePolicy({
+      ...base,
+      workspaceType: "client",
+      directRole: "owner",
+      agency: { name: "Acme Agency", role: "member" },
+    })
+    expect(named.canLeave && named.impact).toMatch(/owners of Acme Agency will keep ownership/)
+  })
+
+  it("says so when access continues through the agency", () => {
+    const policy = leavePolicy({
+      ...base,
+      workspaceType: "client",
+      directRole: "member",
+      agency: { name: "Acme Agency", role: "admin" },
+    })
+    expect(policy.canLeave && policy.impact).toMatch(/still reach it as an admin of Acme Agency/)
+  })
+
+  it("has nothing to leave without a direct membership", () => {
+    const policy = leavePolicy({
+      ...base,
+      workspaceType: "client",
+      directRole: null,
+      agency: { name: "Acme Agency", role: "owner" },
+    })
+    expect(policy).toMatchObject({ canLeave: false, reason: "no_direct_membership" })
+    expect(!policy.canLeave && policy.explanation).toMatch(/through Acme Agency/)
+  })
+})
+
+describe("ownership and leave errors", () => {
+  it("explains an agency's last owner trying to leave", () => {
+    const error = toLeaveError({
+      code: "P0001",
+      message: "A workspace must have at least one owner",
+    })
+    expect(toPublicError(error).message).toMatch(/only owner of this workspace. Transfer ownership/)
+  })
+
+  it("words each ownership refusal", () => {
+    expect(ownershipRefusalError("not_member").code).toBe("NOT_FOUND")
+    expect(toPublicError(ownershipRefusalError("already_owner")).message).toMatch(
+      /already an owner/
+    )
+    expect(toPublicError(ownershipRefusalError("self")).message).toMatch(/your own membership/)
+  })
+
+  it("maps the functions' 42501 to who may do it", () => {
+    const refused = { code: "42501", message: "Only a direct owner…" }
+    expect(toPublicError(toOwnershipWriteError(refused, "transfer")).message).toMatch(
+      /direct owner/
+    )
+    expect(toPublicError(toOwnershipWriteError(refused, "make_owner")).message).toMatch(
+      /client workspace/
+    )
+    const unknown = toOwnershipWriteError({ code: "XX000", message: "boom" }, "transfer")
+    expect(unknown.code).toBe("INTERNAL")
+    expect(toPublicError(unknown).message).not.toContain("boom")
   })
 })

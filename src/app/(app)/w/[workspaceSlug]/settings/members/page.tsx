@@ -66,6 +66,7 @@ export default async function MembersPage({
       : `Created ${date.format(new Date(invitation.createdAt))}`,
   }))
   const othersCount = members.filter((member) => member.userId !== viewer.id).length
+  const directRole = members.find((member) => member.userId === viewer.id)?.role ?? null
 
   return (
     <div className="grid gap-6">
@@ -108,7 +109,7 @@ export default async function MembersPage({
               workspaceId={workspace.id}
               workspaceName={workspace.name}
               workspaceType={workspace.type}
-              viewer={{ userId: viewer.id, role: workspace.role }}
+              viewer={{ userId: viewer.id, role: workspace.role, directRole }}
               members={memberRows}
             />
           ) : null}

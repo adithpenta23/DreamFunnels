@@ -6,7 +6,7 @@ import { AppError } from "@/lib/errors"
 import { createClient } from "@/lib/supabase/server"
 import { isWellFormedInvitationToken } from "../lib/tokens"
 import type { InvitableRole } from "../schemas"
-import type { InvitationPreview, OpenInvitation } from "../types"
+import type { InvitationPreview, OpenInvitation, PendingInvitation } from "../types"
 import { hashInvitationToken } from "./tokens"
 
 /**
@@ -95,5 +95,29 @@ export const listOpenInvitations = cache(async (workspaceId: string): Promise<Op
     createdAt: row.created_at,
     lastSentAt: row.last_sent_at,
     deliveryStatus: row.delivery_status as OpenInvitation["deliveryStatus"],
+  }))
+})
+
+/**
+ * Open invitations addressed to the signed-in user's VERIFIED email, newest
+ * first (list_my_pending_invitations: display fields and the id to accept by;
+ * never the token hash). Empty while the address is unconfirmed.
+ */
+export const listMyPendingInvitations = cache(async (): Promise<PendingInvitation[]> => {
+  await requireUser()
+  const supabase = await createClient()
+  const { data, error } = await supabase.rpc("list_my_pending_invitations")
+  if (error) {
+    throw new AppError("INTERNAL", "Failed to load pending invitations", {
+      cause: error,
+      context: { code: error.code },
+    })
+  }
+  return data.map((row) => ({
+    id: row.invitation_id,
+    workspaceName: row.workspace_name,
+    role: row.role as InvitableRole,
+    inviterName: row.inviter_name,
+    expiresAt: row.expires_at,
   }))
 })

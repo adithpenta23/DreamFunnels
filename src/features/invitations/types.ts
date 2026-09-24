@@ -30,3 +30,12 @@ export type InviteResult =
   | { status: "invited"; invitationId: string; email: string; delivery: InvitationDelivery }
   | { status: "already_pending"; invitationId: string; email: string }
   | { status: "already_member"; email: string }
+
+/** An open invitation for the signed-in user's verified email (onboarding). */
+export type PendingInvitation = {
+  id: string
+  workspaceName: string
+  role: InvitableRole
+  inviterName: string | null
+  expiresAt: string
+}

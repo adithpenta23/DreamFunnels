@@ -2,11 +2,22 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { toast } from "@/components/ui/toast"
 import { acmeWorkspace } from "@/test/fixtures"
-import { changeMemberRoleAction, removeMemberAction } from "../actions"
+import {
+  changeMemberRoleAction,
+  makeOwnerAction,
+  removeMemberAction,
+  transferOwnershipAction,
+} from "../actions"
 import type { WorkspaceRole } from "../lib/roles"
+import type { WorkspaceType } from "../types"
 import { MembersList, type MemberRow } from "./members-list"
 
-vi.mock("../actions", () => ({ changeMemberRoleAction: vi.fn(), removeMemberAction: vi.fn() }))
+vi.mock("../actions", () => ({
+  changeMemberRoleAction: vi.fn(),
+  removeMemberAction: vi.fn(),
+  transferOwnershipAction: vi.fn(),
+  makeOwnerAction: vi.fn(),
+}))
 vi.mock("@/components/ui/toast", () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
 const owner: MemberRow = {
@@ -32,13 +43,21 @@ const sarah: MemberRow = {
   role: "member",
 }
 
-function renderAs(viewer: MemberRow, role: WorkspaceRole = viewer.role) {
+function renderAs(
+  viewer: MemberRow,
+  role: WorkspaceRole = viewer.role,
+  options: { type?: WorkspaceType; directRole?: WorkspaceRole | null } = {}
+) {
   return render(
     <MembersList
       workspaceId={acmeWorkspace.id}
       workspaceName={acmeWorkspace.name}
-      workspaceType="agency"
-      viewer={{ userId: viewer.userId, role }}
+      workspaceType={options.type ?? "agency"}
+      viewer={{
+        userId: viewer.userId,
+        role,
+        directRole: options.directRole === undefined ? viewer.role : options.directRole,
+      }}
       members={[owner, admin, sarah]}
     />
   )
@@ -166,7 +185,7 @@ describe("MembersList", () => {
         workspaceId={acmeWorkspace.id}
         workspaceName={acmeWorkspace.name}
         workspaceType="agency"
-        viewer={{ userId: owner.userId, role: "owner" }}
+        viewer={{ userId: owner.userId, role: "owner", directRole: "owner" }}
         members={[owner, coOwner]}
       />
     )
@@ -175,5 +194,159 @@ describe("MembersList", () => {
     )
     const dialog = await screen.findByRole("dialog")
     expect(dialog).toHaveTextContent(/removes their ownership/)
+  })
+})
+
+describe("MembersList ownership actions", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  const menuItems = async (name: string) =>
+    within(await openActions(name))
+      .getAllByRole("menuitem")
+      .map((item) => item.textContent)
+
+  it("offers direct owners 'Transfer ownership…' for non-owners only; never 'Make owner…' in an agency", async () => {
+    renderAs(owner)
+    expect(await menuItems("Sarah Lee")).toEqual([
+      "Change role…",
+      "Transfer ownership…",
+      "Remove from workspace…",
+    ])
+  })
+
+  it("never offers ownership actions to admins", async () => {
+    renderAs(admin)
+    expect(await menuItems("Sarah Lee")).toEqual(["Change role…", "Remove from workspace…"])
+  })
+
+  it("asks for the workspace name, then transfers and closes", async () => {
+    vi.mocked(transferOwnershipAction).mockResolvedValue({
+      ok: true,
+      data: { newOwnerName: "Sarah Lee" },
+    })
+    renderAs(owner)
+    fireEvent.click(
+      within(await openActions("Sarah Lee")).getByRole("menuitem", {
+        name: "Transfer ownership…",
+      })
+    )
+    const dialog = await screen.findByRole("dialog", {
+      name: "Transfer ownership to Sarah Lee?",
+    })
+    expect(dialog).toHaveTextContent(
+      "Sarah Lee will become the workspace owner and you will become an admin."
+    )
+    const confirm = within(dialog).getByRole("button", { name: "Transfer ownership" })
+    const input = within(dialog).getByLabelText(/Type Acme Rockets to confirm/)
+    expect(confirm).toBeDisabled()
+
+    fireEvent.change(input, { target: { value: "acme rockets" } })
+    expect(confirm).toBeDisabled()
+    fireEvent.change(input, { target: { value: "Acme Rockets" } })
+    expect(confirm).toBeEnabled()
+    fireEvent.click(confirm)
+
+    await waitFor(() =>
+      expect(transferOwnershipAction).toHaveBeenCalledWith({
+        workspaceId: acmeWorkspace.id,
+        userId: sarah.userId,
+        confirmation: "Acme Rockets",
+      })
+    )
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+    expect(toast.success).toHaveBeenCalledWith(
+      "Sarah Lee is now the owner of Acme Rockets",
+      expect.objectContaining({ description: "You're an admin of this workspace now." })
+    )
+  })
+
+  it("shows the server's reason on the field or the form, and stays open", async () => {
+    vi.mocked(transferOwnershipAction)
+      .mockResolvedValueOnce({
+        ok: false,
+        error: {
+          code: "VALIDATION",
+          message: "Invalid input",
+          fieldErrors: { confirmation: ["Type Acme Rockets exactly to confirm."] },
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        error: {
+          code: "NOT_FOUND",
+          message: "That person isn't a member of this workspace any more.",
+        },
+      })
+    renderAs(owner)
+    fireEvent.click(
+      within(await openActions("Sarah Lee")).getByRole("menuitem", {
+        name: "Transfer ownership…",
+      })
+    )
+    const dialog = await screen.findByRole("dialog")
+    const input = within(dialog).getByLabelText(/to confirm/)
+    fireEvent.change(input, { target: { value: "Acme Rockets" } })
+    fireEvent.click(within(dialog).getByRole("button", { name: "Transfer ownership" }))
+
+    await waitFor(() => expect(input).toHaveAttribute("aria-invalid", "true"))
+    expect(dialog).toHaveTextContent("Type Acme Rockets exactly to confirm.")
+
+    // Wait for the committed, idle button before retrying.
+    fireEvent.click(await within(dialog).findByRole("button", { name: "Transfer ownership" }))
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(/isn't a member/)
+    expect(toast.success).not.toHaveBeenCalled()
+  })
+
+  it("closes with Escape without transferring", async () => {
+    renderAs(owner)
+    fireEvent.click(
+      within(await openActions("Sarah Lee")).getByRole("menuitem", {
+        name: "Transfer ownership…",
+      })
+    )
+    const dialog = await screen.findByRole("dialog")
+    fireEvent.keyDown(dialog, { key: "Escape" })
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+    expect(transferOwnershipAction).not.toHaveBeenCalled()
+  })
+
+  it("in a client, an agency owner (no direct row) can make owner but not transfer", async () => {
+    vi.mocked(makeOwnerAction).mockResolvedValue({ ok: true, data: null })
+    const agencyOwner: MemberRow = { ...owner, userId: "00000000-0000-4000-8000-000000000009" }
+    renderAs(agencyOwner, "owner", { type: "client", directRole: null })
+
+    expect(await menuItems("Sarah Lee")).toEqual([
+      "Change role…",
+      "Make owner…",
+      "Remove from workspace…",
+    ])
+    fireEvent.click(screen.getByRole("menuitem", { name: "Make owner…" }))
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "Make Sarah Lee an owner of Acme Rockets?",
+    })
+    expect(dialog).toHaveTextContent(/Your own role doesn't change/)
+    fireEvent.click(within(dialog).getByRole("button", { name: "Make owner" }))
+
+    await waitFor(() =>
+      expect(makeOwnerAction).toHaveBeenCalledWith({
+        workspaceId: acmeWorkspace.id,
+        userId: sarah.userId,
+      })
+    )
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("Sarah Lee is now an owner of Acme Rockets")
+    )
+  })
+
+  it("in a client, a direct owner gets both", async () => {
+    renderAs(owner, "owner", { type: "client" })
+    expect(await menuItems("Adam Admin")).toEqual([
+      "Change role…",
+      "Make owner…",
+      "Transfer ownership…",
+      "Remove from workspace…",
+    ])
   })
 })

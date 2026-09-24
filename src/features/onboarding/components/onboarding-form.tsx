@@ -8,7 +8,14 @@ import { Input } from "@/components/ui/input"
 import { NewWorkspaceFields } from "@/features/workspaces/components/new-workspace-fields"
 import { completeOnboarding, type OnboardingState } from "../actions"
 
-export function OnboardingForm({ defaultFullName }: { defaultFullName: string }) {
+export function OnboardingForm({
+  defaultFullName,
+  autoFocus = true,
+}: {
+  defaultFullName: string
+  /** Off when pending invitations are listed above the form. */
+  autoFocus?: boolean
+}) {
   const [state, formAction] = useActionState<OnboardingState, FormData>(completeOnboarding, null)
   const [fullName, setFullName] = useState(defaultFullName)
 
@@ -27,7 +34,7 @@ export function OnboardingForm({ defaultFullName }: { defaultFullName: string })
           value={fullName}
           onChange={(event) => setFullName(event.target.value)}
           required
-          autoFocus
+          autoFocus={autoFocus}
         />
       </FormField>
       <NewWorkspaceFields errors={fieldErrors} />

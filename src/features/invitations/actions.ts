@@ -11,9 +11,18 @@ import { logger } from "@/lib/logger"
 import { runAction } from "@/lib/run-action"
 import { acceptFailureError } from "./lib/errors"
 import { PENDING_INVITATION_COOKIE } from "./lib/pending-invitation"
-import { acceptInvitationSchema, invitationRefSchema, inviteMemberSchema } from "./schemas"
+import {
+  acceptInvitationSchema,
+  acceptPendingInvitationSchema,
+  invitationRefSchema,
+  inviteMemberSchema,
+} from "./schemas"
 import { inviteToWorkspace, resendInvitation } from "./server/invite"
-import { acceptInvitationRecord, revokeInvitationRecord } from "./server/records"
+import {
+  acceptInvitationByIdRecord,
+  acceptInvitationRecord,
+  revokeInvitationRecord,
+} from "./server/records"
 import { hashInvitationToken } from "./server/tokens"
 import type { InvitationDelivery, InviteResult } from "./types"
 
@@ -165,6 +174,47 @@ export async function acceptInvitationAction(
     ;(await cookies()).delete(PENDING_INVITATION_COOKIE)
 
     logger.info("workspaces.invitation_accepted", { alreadyMember: outcome.alreadyMember })
+    return { workspaceSlug: outcome.workspaceSlug, alreadyMember: outcome.alreadyMember }
+  })
+}
+
+/**
+ * Accepts one of the signed-in user's pending invitations (the onboarding
+ * list, for people who confirmed their email without the invitation link at
+ * hand). The id is only a reference: the database re-checks that the
+ * caller's verified email is the invited one and takes the workspace and role
+ * from the invitation. Nothing is accepted without this explicit action.
+ */
+export async function acceptPendingInvitationAction(input: {
+  invitationId: string
+  fullName?: string
+}): Promise<ActionResult<{ workspaceSlug: string; alreadyMember: boolean }>> {
+  const parsed = acceptPendingInvitationSchema.safeParse(input)
+  if (!parsed.success) return validationFailed(parsed.error)
+  const { invitationId, fullName } = parsed.data
+
+  return runAction("invitations.acceptPending", async () => {
+    const user = await getCurrentUser()
+    if (!user) {
+      throw new AppError("UNAUTHENTICATED", "Your session has ended. Sign in again to accept.", {
+        expose: true,
+      })
+    }
+
+    const outcome = await acceptInvitationByIdRecord(invitationId)
+    if (!outcome.ok) throw acceptFailureError(outcome.reason)
+
+    if (fullName) {
+      try {
+        await saveProfile(user.id, { fullName })
+      } catch (error) {
+        logger.warn("invitations.name_not_saved", { error })
+      }
+    }
+    logger.info("workspaces.invitation_accepted", {
+      alreadyMember: outcome.alreadyMember,
+      method: "pending_list",
+    })
     return { workspaceSlug: outcome.workspaceSlug, alreadyMember: outcome.alreadyMember }
   })
 }

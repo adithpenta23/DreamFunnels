@@ -1,14 +1,23 @@
 name: Deploy database
 
-# Applies supabase/migrations to a hosted Supabase project, then checks that
-# project's Auth settings (email confirmation on, asymmetric JWT signing keys).
+# Applies supabase/migrations to a hosted Supabase project, then runs the
+# hosted gate (npm run verify:hosted) against that environment.
 #
 # Manual only. Each target is a GitHub Environment (Settings -> Environments:
-# "staging", "production") holding that project's values; give "production"
-# required reviewers. See docs/ARCHITECTURE.md "Environments".
+# "staging", "production") holding that project's values; "production" must
+# have required reviewers. See docs/DEPLOYMENT.md.
 #   secrets: SUPABASE_ACCESS_TOKEN, SUPABASE_DB_PASSWORD
 #   vars:    SUPABASE_PROJECT_REF, NEXT_PUBLIC_SUPABASE_URL,
-#            NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+#            NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY, NEXT_PUBLIC_APP_URL
+#
+# Safety:
+#   - Nothing runs unless you pick a target. The default is a preview: it
+#     lists local vs remote migrations and prints what `db push` would apply,
+#     and changes nothing. Tick "apply" to push.
+#   - Production also needs its project ref typed into "confirm_project_ref"
+#     (and the environment's reviewers to approve the job).
+#   - Migrations are append-only; this workflow never resets, repairs or
+#     drops anything, and there is no reset path in CI.
 on:
   workflow_dispatch:
     inputs:
@@ -17,6 +26,21 @@ on:
         required: true
         type: choice
         options: [staging, production]
+      apply:
+        description: Apply the pending migrations (unticked = preview only)
+        required: false
+        type: boolean
+        default: false
+      confirm_project_ref:
+        description: Production only - type the production project ref to confirm
+        required: false
+        type: string
+        default: ""
+      auth_only:
+        description: Check Supabase Auth only (first bring-up, before the app is deployed)
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -27,17 +51,45 @@ concurrency:
 
 jobs:
   migrate:
-    name: Migrate ${{ inputs.environment }}
+    name: ${{ inputs.apply && 'Migrate' || 'Preview' }} ${{ inputs.environment }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     environment: ${{ inputs.environment }}
     env:
+      TARGET: ${{ inputs.environment }}
+      CONFIRM_PROJECT_REF: ${{ inputs.confirm_project_ref }}
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
       SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
       NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
       NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+      NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL }}
+      VERIFY_EXPECT_APP_ENV: ${{ inputs.environment }}
     steps:
+      - name: Check the target
+        run: |
+          missing=""
+          for name in SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD SUPABASE_PROJECT_REF NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY; do
+            if [ -z "${!name}" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing in the GitHub Environment \"$TARGET\":$missing"
+            exit 1
+          fi
+          case "$NEXT_PUBLIC_SUPABASE_URL" in
+            "https://${SUPABASE_PROJECT_REF}.supabase.co"|"https://${SUPABASE_PROJECT_REF}.supabase.co/") ;;
+            *) echo "::error::NEXT_PUBLIC_SUPABASE_URL doesn't belong to SUPABASE_PROJECT_REF in \"$TARGET\"."; exit 1 ;;
+          esac
+          if [ "$TARGET" = "production" ] && [ "$CONFIRM_PROJECT_REF" != "$SUPABASE_PROJECT_REF" ]; then
+            echo "::error::Production needs its project ref typed into confirm_project_ref."
+            exit 1
+          fi
+          if [ -n "$CONFIRM_PROJECT_REF" ] && [ "$CONFIRM_PROJECT_REF" != "$SUPABASE_PROJECT_REF" ]; then
+            echo "::error::confirm_project_ref doesn't match the \"$TARGET\" project."
+            exit 1
+          fi
+          echo "Target: $TARGET (project ${SUPABASE_PROJECT_REF})"
+
       - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
@@ -51,11 +103,16 @@ jobs:
       - name: Link the Supabase project
         run: npx supabase link --project-ref "$SUPABASE_PROJECT_REF"
 
-      - name: Show migrations (local vs remote)
+      - name: Migrations (local vs remote)
         run: npx supabase migration list
 
+      - name: Preview what would be applied
+        run: npx supabase db push --dry-run
+
       - name: Apply pending migrations
+        if: ${{ inputs.apply }}
         run: npx supabase db push
 
-      - name: Verify Auth configuration
-        run: npm run verify:hosted
+      - name: Hosted gate (verify:hosted)
+        if: ${{ inputs.apply }}
+        run: npm run verify:hosted -- ${{ inputs.auth_only && '--auth-only' || '' }}

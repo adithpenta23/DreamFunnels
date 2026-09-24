@@ -1,29 +1,32 @@
 # Architecture
 
 DreamFunnels is a funnel, website and lead-to-appointment platform for agencies and local-service
-businesses. This document describes the system as it stands after Sprint 3 (client workspaces,
-members, invitations and transactional email, on Sprint 2's agency → client tenancy and the
-Sprint 0–1 foundation), the rules every feature must follow, and the decisions behind them. Keep
-it current: an architectural change isn't done until this file says so.
+businesses. This document describes the system as it stands after Sprint 4 (ownership transfer,
+leaving, the audit log viewer, the pending-invitation fallback and the staging/production
+pipeline, on Sprint 3's client workspaces, members, invitations and email, Sprint 2's agency →
+client tenancy and the Sprint 0–1 foundation), the rules every feature must follow, and the
+decisions behind them. Keep it current: an architectural change isn't done until this file says
+so. Environments and releases are in `docs/DEPLOYMENT.md`.
 
 ## At a glance
 
-| Concern         | Choice                                                                       |
-| --------------- | ---------------------------------------------------------------------------- |
-| App framework   | Next.js 16 (App Router, React 19, Turbopack), TypeScript strict              |
-| Hosting         | Vercel (Node.js runtime)                                                     |
-| Database & auth | Supabase: Postgres 17 + Auth, accessed via `@supabase/ssr`                   |
-| Authorization   | Postgres Row Level Security (RLS) + server-side guards                       |
-| Tenancy         | Workspaces: agencies, each with one level of client workspaces               |
-| Authentication  | Supabase Auth, email + password, sessions in HTTP-only cookies               |
-| Abuse control   | App-level rate limits (per IP and email, Postgres) + Turnstile CAPTCHA       |
-| Email           | Transactional only: Resend (hosted) / Mailpit (local), behind an interface   |
-| UI              | Tailwind CSS v4, shadcn/ui (Base UI primitives, incl. Toast), lucide         |
-| Validation      | Zod 4 at every trust boundary (env, forms, actions)                          |
-| Client state    | Zustand, only for ephemeral UI state; React context for app context          |
-| Testing         | Vitest (unit, component, database/RLS on PGlite), Playwright (E2E)           |
-| CI              | GitHub Actions: typecheck, lint, format, tests, build, E2E on local Supabase |
-| Observability   | Structured JSON logs; Sentry- and PostHog-ready seams (no SDKs installed)    |
+| Concern         | Choice                                                                         |
+| --------------- | ------------------------------------------------------------------------------ |
+| App framework   | Next.js 16 (App Router, React 19, Turbopack), TypeScript strict                |
+| Hosting         | Vercel (Node.js runtime)                                                       |
+| Database & auth | Supabase: Postgres 17 + Auth, accessed via `@supabase/ssr`                     |
+| Authorization   | Postgres Row Level Security (RLS) + server-side guards                         |
+| Tenancy         | Workspaces: agencies, each with one level of client workspaces                 |
+| Authentication  | Supabase Auth, email + password, sessions in HTTP-only cookies                 |
+| Abuse control   | App-level rate limits (per IP and email, Postgres) + Turnstile CAPTCHA         |
+| Email           | Transactional only: Resend (hosted) / Mailpit (local), behind an interface     |
+| UI              | Tailwind CSS v4, shadcn/ui (Base UI primitives, incl. Toast), lucide           |
+| Validation      | Zod 4 at every trust boundary (env, forms, actions)                            |
+| Client state    | Zustand, only for ephemeral UI state; React context for app context            |
+| Testing         | Vitest (unit, component, database/RLS on PGlite), Playwright (E2E)             |
+| CI              | GitHub Actions: quality, database (db lint, type drift), E2E, confirmation E2E |
+| Environments    | local · staging (own Supabase + Vercel project) · production, see DEPLOYMENT   |
+| Observability   | Structured JSON logs; Sentry- and PostHog-ready seams (no SDKs installed)      |
 
 It's a **modular monolith**: one deployable Next.js app plus one Supabase project. No
 microservices, queues or separate APIs until a real need forces one (see "Extension points").
@@ -45,11 +48,18 @@ flowchart LR
 
 ```
 .github/workflows/
-  ci.yml                     CI quality gates
-  deploy-database.yml        Manual: migrate a hosted project, then verify its Auth settings
-docs/                        Architecture, database and QA docs
+  ci.yml                     CI gates: quality, database, e2e, e2e-confirmation
+  deploy-database.yml        Manual: preview/apply migrations on a hosted project, then verify:hosted
+  staging-smoke.yml          Manual: verify:hosted + the staging browser journey
+docs/                        Architecture, database, QA and deployment docs
 e2e/                         Playwright specs (smoke: no backend; the rest need Supabase + Mailpit)
-scripts/verify-hosted-auth.mts  npm run verify:hosted (hosted Auth settings check)
+  confirmation/              Journeys that need email confirmation ON (the e2e-confirmation job)
+  support/targets.ts         Which deployment a suite may touch (local: loopback only)
+e2e-staging/                 The staging smoke (playwright.staging.config.ts)
+scripts/
+  verify-hosted.mts          npm run verify:hosted: the hosted gate (Auth + app, from outside)
+  check-db-types.mts         npm run db:types:check: generated types match the migrations
+  ci/                        CI-only helpers (the email-confirmation config override)
 supabase/
   config.toml                Local stack config (auth settings, redirect URLs, ports)
   migrations/                Ordered SQL migrations: the schema's source of truth
@@ -63,7 +73,7 @@ src/
       dashboard/             Post-sign-in landing: redirects to onboarding or a workspace
       (setup)/               onboarding, workspaces/new (focused layout, no shell)
       w/[workspaceSlug]/     Workspace shell + dashboard home, clients (agencies),
-                             settings (general, members, account)
+                             settings (general + leave, members, audit log, account)
     auth/callback/           Supabase email-link completion (confirm, recovery)
     api/health/              Liveness probe
   components/
@@ -117,9 +127,20 @@ Current slices:
 | `account`     | The user's profile: name, phone, time zone, locale                                                  |
 | `onboarding`  | First-run setup: name + first workspace (seeded with the browser's time zone and locale)            |
 | `workspaces`  | Workspaces, access guards (incl. agency access), slugs, switcher, settings, business profile,       |
-|               | clients (list, "Add client"), members (list, role changes, removal)                                 |
-| `invitations` | Invitations: tokens, invite/resend/revoke, the public invitation page, acceptance                   |
+|               | clients (list, search, "Add client"), members (roles, removal, ownership transfer, make owner),     |
+|               | leaving a workspace                                                                                 |
+| `invitations` | Invitations: tokens, invite/resend/revoke, the public invitation page, acceptance (by link and from |
+|               | the onboarding pending list)                                                                        |
+| `audit-log`   | The audit log viewer: event wording, URL filters, the read query                                    |
 | `email`       | Transactional email: version-controlled templates and `sendTransactionalEmail()`                    |
+
+**The `workspaces` slice** (Sprint 4 assessment) owns workspaces, clients, members and settings.
+Clients and members only share the access guards and membership reads with the rest; the
+coupling that exists (workspace actions calling `inviteToWorkspace` for a new client's owner,
+invitation actions reading members) goes through public server modules. Splitting it now would
+move files without removing a dependency, so it's **deferred until after the CRM foundation**,
+when `features/clients` (client lifecycle) and `features/members` can be cut along real seams.
+The audit log started as its own slice instead of growing `workspaces`.
 
 Future slices plug in the same way: `features/funnels`, `features/pages`, `features/publishing`,
 `features/domains`, `features/forms`, `features/contacts`,
@@ -157,7 +178,11 @@ Details:
   Every `?next=` passes through `getSafeRedirectPath` (no open redirects).
 - **Email confirmation**: off in local/CI config (`supabase/config.toml`) so the E2E journey and
   local dev land straight in onboarding; **required in staging and production**. The code handles
-  both. Two guards stop a hosted project from silently running without it: `npm run verify:hosted`
+  both, and CI proves the "on" path too: the `e2e-confirmation` job switches it on for its own
+  stack and runs sign-up → Mailpit link → onboarding, and the invitation journeys (same browser
+  via the cookie, another device via the pending-invitation list). The app signs up with PKCE,
+  so confirmation `token_hash`es start with `pkce_`; the token_hash template still verifies them
+  on any device (tested). Two guards stop a hosted project from silently running without it: `npm run verify:hosted`
   (also run by the deploy-database workflow) fails when Supabase reports `mailer_autoconfirm`, and in
   a hosted `APP_ENV` a sign-up that returns a session straight away logs
   `security.email_confirmation_disabled` at error level.
@@ -319,8 +344,9 @@ Agency owners and admins manage clients at `/w/<agency>/clients` ("Clients" in t
 to them only; agency members get an explanation, clients a 404):
 
 - **List**: name, status (Active = has direct members, Invitation pending, No members yet),
-  primary contact, time zone, member count and created date; `?q=` search and 25 per page in the
-  URL. One query per page: the counts are PostgREST computed fields (`member_count`,
+  primary contact, time zone, member count and created date; `?q=` search (name, business name,
+  business email, and the phone when the search has 3+ digits: one quoted PostgREST `or` filter,
+  `lib/client-search.ts`) and 25 per page in the URL. One query per page: the counts are PostgREST computed fields (`member_count`,
   `pending_invitation_count`), not a query per client.
 - **Add client** (`/clients/new`): one focused form (business, address, workspace name and URL,
   and optionally who to invite) with a "What happens next" summary, rather than a wizard: it's
@@ -344,24 +370,104 @@ the agency's owners and admins can also manage it (they aren't listed: their acc
 
 ### Who can do what
 
-| Action                                | Member | Admin                      | Owner                          |
-| ------------------------------------- | ------ | -------------------------- | ------------------------------ |
-| See members                           | yes    | yes                        | yes                            |
-| See, send, resend, revoke invitations | no     | yes (member or admin role) | yes (member or admin role)     |
-| Change a role (member ⇄ admin)        | no     | non-owners                 | anyone, incl. demoting owners¹ |
-| Remove someone                        | no     | non-owners                 | anyone¹                        |
-| Grant ownership                       | no     | no                         | not in this release²           |
-| Add client workspaces (agencies)      | no     | yes                        | yes                            |
-| Act on your own row (role, removal)   | no     | no                         | no                             |
+| Action                                | Member | Admin                      | Owner                                  |
+| ------------------------------------- | ------ | -------------------------- | -------------------------------------- |
+| See members                           | yes    | yes                        | yes                                    |
+| See, send, resend, revoke invitations | no     | yes (member or admin role) | yes (member or admin role)             |
+| Change a role (member ⇄ admin)        | no     | non-owners                 | anyone, incl. demoting owners¹         |
+| Remove someone                        | no     | non-owners                 | anyone¹                                |
+| Transfer ownership                    | no     | no                         | **direct** owners, to a direct member² |
+| Make owner (client workspaces only)   | no     | no                         | owners, direct or via the agency²      |
+| Read the audit log                    | no     | yes                        | yes                                    |
+| Add client workspaces (agencies)      | no     | yes                        | yes                                    |
+| Leave the workspace                   | yes    | yes                        | yes, unless an agency's last owner³    |
+| Act on your own row (role, removal)   | no     | no                         | no (leave from Settings → General)     |
 
-¹ Never the last owner: the `protect_last_owner` trigger refuses it and the UI explains why.
-² Invitations can't grant `owner` (a CHECK constraint), and the role picker offers member and
-admin only. An ownership-transfer flow is future work. "Admin" in an agency means admin of every
+¹ Never an agency's last owner, and never a client's last direct owner unless its agency has an
+owner (the client continuity rule below): the `protect_last_owner` trigger decides, and the UI
+shows its message.
+² Ownership is granted only by the two ownership functions, never by a role change: the role
+picker offers member and admin, invitations can't grant `owner` (a CHECK constraint), and RLS
+refuses a direct `UPDATE … role = 'owner'` (Sprint 4). "Admin" in an agency means admin of every
 client too, which the role picker says in so many words.
+³ See "Leaving a workspace".
 
-`memberActionsFor()` (`features/workspaces/lib/members.ts`) is the pure rule the UI and the
-actions share; RLS on `workspace_members` and the trigger enforce it again underneath.
-Removing someone deletes the membership only: never their account or their other workspaces.
+`memberActionsFor()` and `ownershipActionsFor()` (`features/workspaces/lib/members.ts`) are the
+pure rules the UI and the actions share; RLS on `workspace_members`, the ownership functions and
+the trigger enforce them again underneath. Removing someone deletes the membership only: never
+their account or their other workspaces.
+
+### Ownership
+
+- **Transfer** (`transfer_workspace_ownership`, agencies and clients): a **direct** owner hands
+  ownership to a **direct member** of the same workspace. The member becomes an owner and the
+  caller an admin, in one transaction. The function locks both membership rows (ordered by user
+  id, so concurrent transfers can't deadlock) and then the workspace row, the same order the
+  last-owner trigger uses, and re-checks everything under the locks: two transfers at once, or a
+  transfer racing a removal or demotion, end in one consistent result (tested against the real
+  database in `e2e/ownership-api.spec.ts`). The UI: Members → the member's menu → "Transfer
+  ownership…", a dialog that says what happens and asks for the workspace name, typed, before
+  the button enables.
+- **Make owner** (`make_workspace_owner`, **client workspaces only**): an owner of the client
+  (direct, or an owner of its agency) makes a direct member an owner without stepping down.
+  Agency owners have no direct row to transfer from, so this is how a client's own
+  representative becomes its owner. Agencies don't offer it: their owners transfer.
+- Targets are always existing direct members of that workspace: never a pending invitation, an
+  inherited agency role, a sibling client's member, a raw email or a contact. Invitations still
+  never grant ownership.
+- Each change writes one audit event (`workspace.ownership_transferred`,
+  `workspace.owner_granted`); the functions tell the membership trigger (a transaction-local
+  flag) not to log the underlying role updates a second time.
+
+### Client continuity rule
+
+An agency's owners own its clients (Sprint 2 inheritance), so ownership continuity for a client
+counts them:
+
+- in a client, an agency owner may demote or remove the client's **only direct owner**, and the
+  client's last direct owner may leave;
+- the fallback needs a real owner in the agency (if the agency somehow has none, e.g. after an
+  account deletion, the client keeps protecting its direct owner);
+- agency **admins** still never act on owners (RLS), and **agencies must always keep a direct
+  owner**;
+- agency staff are never inserted into client memberships; inheritance stays in
+  `user_workspace_ids()` / `workspace_role()`.
+
+It's implemented in `private.protect_last_owner()` (a new migration), so no UI or API path can
+get around it.
+
+### Leaving a workspace
+
+Settings → General → "Leave workspace" (danger zone). Leaving deletes the caller's own
+membership row (RLS has always allowed that); the trigger above decides whether an owner may go
+and the audit trigger records `workspace.member_left`.
+
+| Who                                              | Leave? | What the dialog says                                   |
+| ------------------------------------------------ | ------ | ------------------------------------------------------ |
+| Member, admin                                    | yes    | "You'll lose access to this workspace."                |
+| Owner with another direct owner                  | yes    | … "The other owners keep managing it."                 |
+| A client's last direct owner                     | yes    | … "the owners of <agency> will keep ownership."        |
+| An agency's last owner                           | no     | button disabled: "Transfer ownership … first"          |
+| Access only through the agency (no row)          | no     | button disabled: access follows the agency role        |
+| Direct member who also reaches it via the agency | yes    | "You'll still reach it as an admin/owner of <agency>." |
+
+`leavePolicy()` computes this on the server; the action (`leaveWorkspaceAction`) re-checks and
+returns where to go next: the caller's oldest remaining workspace other than the one just left
+(`findLandingWorkspace`), or onboarding. Access disappears with the row (RLS), which the E2E
+journeys check by opening the old URL.
+
+### Pending invitations (fallback)
+
+Someone who confirms their email on another device (so without the pending-invitation cookie),
+or who lost the link, lands in onboarding. There, **"You have pending invitations"** lists the
+open, unexpired, unrevoked invitations for their **verified** email
+(`list_my_pending_invitations`: workspace, role, inviter, expiry, id; never the token hash),
+each with an Accept button; nothing is accepted automatically, and onboarding is unchanged
+without any. Accepting by id (`accept_workspace_invitation_by_id`) and by link
+(`accept_workspace_invitation`) share one private routine, `private.accept_invitation()`: the
+same checks, lock, membership insert and audit event. The id path first requires the caller to
+be the verified invitee and answers `invalid` to anyone else, so an id reveals nothing; the
+workspace and role always come from the invitation.
 
 ### Invitation lifecycle
 
@@ -422,9 +528,24 @@ sequenceDiagram
 
 Membership and invitation changes are security-sensitive, so a minimal append-only
 `private.audit_log` records them: a trigger on `workspace_members` (added, role changed, removed,
-left) and the invitation and client functions (invited, resent, revoked, accepted, client
-created), each with the actor (`auth.uid()`), workspace, target and a small JSON payload. It's
-not exposed through the Data API and nobody can update or delete rows. There's no UI yet.
+left), the invitation and client functions (invited, resent, revoked, accepted, client created)
+and the ownership functions (ownership transferred, owner added), each with the actor
+(`auth.uid()`), workspace, target and a small JSON payload. The table isn't exposed through the
+Data API and nobody can update or delete rows.
+
+**Viewer** (Sprint 4): Settings → Audit log, for the workspace's owners and admins (agency owners
+and admins also for their clients, by inheritance). Members don't see the link, and opening the
+URL explains why. The only read path is `list_workspace_audit_events()`, a definer function that
+checks the role, returns one workspace's events newest first with keyset paging (the cursor is
+the last event's id; the function compares `(created_at, id)`), optional filters (action, actor,
+calendar days in the workspace's time zone), display names and an allowlisted `details` object:
+no ids, tokens or hashes. The page turns each event into a sentence ("Sarah became workspace
+owner; Adith became admin."): no raw JSON. People who acted in the workspace, including agency
+staff acting in a client, are named: that's the point of the log, and this is the "explicit,
+narrow read path" the tenancy rules ask for.
+
+**Retention**: one year (policy). No cleanup job exists yet; it's an operational follow-up
+(`docs/DEPLOYMENT.md`), and rows are deleted with their workspace.
 
 ## Transactional email
 
@@ -627,8 +748,14 @@ lib/email             EmailProvider.send(message) → { ok, messageId } | { ok: 
 - Invitations (Sprint 3): hashed single-use tokens, acceptance bound to the verified invited
   email, uncached and unindexed invitation pages, rate-limited sending, and an append-only audit
   log of membership changes (see "Members and invitations").
-- Not yet (tracked): Content-Security-Policy with nonces, MFA, email change, account deletion,
-  an audit log UI, Supabase-native CAPTCHA (see below).
+- Ownership and membership (Sprint 4): ownership only through audited definer functions, the
+  client continuity rule in the last-owner trigger, an owners/admins-only audit log viewer, and
+  a pending-invitation list bound to the verified email.
+- Deployment targets (Sprint 4): the local E2E suites refuse non-loopback URLs; the staging smoke
+  refuses anything but the configured staging URL reporting `staging`; no workflow can reset a
+  hosted database (`docs/DEPLOYMENT.md`).
+- Not yet (tracked): Content-Security-Policy with nonces (a gate before tenant-authored pages;
+  `docs/DEPLOYMENT.md`), MFA, email change, account deletion, Supabase-native CAPTCHA (see below).
 
 ## Abuse protection (rate limiting and CAPTCHA)
 
@@ -684,54 +811,19 @@ stranger's budget for free and lock them out of signing up or resetting a passwo
 
 ## Deployment
 
-### Environments
+Environments (local, staging, production), the release flow (CI → `main` → the staging Vercel
+project, database migrations through the **Deploy database** workflow, production by manual
+promotion), the manual setup checklists, the hosted gate (`npm run verify:hosted`) and the
+staging smoke are in **`docs/DEPLOYMENT.md`**. The short version:
 
-| Environment | Runs where                       | Supabase                           | `APP_ENV`    |
-| ----------- | -------------------------------- | ---------------------------------- | ------------ |
-| Local       | `npm run dev`, tests, CI         | local stack (`npm run db:start`)   | `local`      |
-| Staging     | Vercel (Preview or a custom env) | its **own** project (`staging`)    | `staging`    |
-| Production  | Vercel Production                | its **own** project (`production`) | `production` |
+| Environment | Runs where                             | Supabase                         | `APP_ENV`    |
+| ----------- | -------------------------------------- | -------------------------------- | ------------ |
+| Local       | `npm run dev`, tests, CI               | local stack (`npm run db:start`) | `local`      |
+| Staging     | its own Vercel project, deploys `main` | its **own** project (Free)       | `staging`    |
+| Production  | Vercel, manual promotion               | its **own** project (Pro)        | `production` |
 
 Never point two environments at one Supabase project: data, users, keys and rate-limit counters
-must stay separate. Staging mirrors production's settings (confirmation on, asymmetric keys, real
-Turnstile widget for its hostname, or Cloudflare's always-pass test keys if preferred).
-
-### Setting up an environment (staging first, then production)
-
-1. **Supabase**: create the project. In Auth settings:
-   - URL Configuration: Site URL = the environment's `NEXT_PUBLIC_APP_URL`; add
-     `<APP_URL>/auth/callback` to the redirect allow-list.
-   - Email provider: **Confirm email ON**, minimum password length 8 (optionally leaked-password
-     protection on paid plans).
-   - Email templates: paste `supabase/templates/confirmation.html` and `recovery.html` (token_hash
-     links that work across devices) and configure custom SMTP (the default sender only emails the
-     project team).
-   - **JWT keys**: Project Settings → JWT Keys → migrate to JWT signing keys and rotate so tokens
-     are signed with the asymmetric (ECC P-256) key; keep the legacy secret only until old tokens
-     expire. Use the new publishable (`sb_publishable_…`) and secret (`sb_secret_…`) API keys.
-2. **Cloudflare Turnstile**: create a widget for the environment's hostname (managed mode) and
-   take its site key and secret.
-3. **Resend** (transactional email): add the sending domain (a subdomain such as
-   `mail.example.com` keeps its reputation separate), publish the SPF, DKIM (and a DMARC) DNS
-   records Resend shows and wait for "Verified", then create an API key with **Sending access**
-   only. Set `EMAIL_PROVIDER=resend`, `RESEND_API_KEY`, `EMAIL_FROM_ADDRESS` (an address on that
-   domain) and optionally `EMAIL_FROM_NAME`. Staging may use Resend's `onboarding@resend.dev`
-   sender to test (it only delivers to the Resend account's own address); production refuses it.
-   The same Resend domain can serve as Supabase Auth's custom SMTP (step 1).
-4. **GitHub**: create an Environment of the same name with secrets `SUPABASE_ACCESS_TOKEN`,
-   `SUPABASE_DB_PASSWORD` and variables `SUPABASE_PROJECT_REF`, `NEXT_PUBLIC_SUPABASE_URL`,
-   `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` (production: add required reviewers). Run the
-   **Deploy database** workflow: it links the project, lists and applies migrations
-   (`supabase db push`), then runs `npm run verify:hosted`, which fails unless email confirmation is
-   on and an asymmetric signing key is published. Migrations are never applied by hand in the
-   dashboard.
-5. **Vercel**: set every variable from `.env.example` for that environment, including
-   `APP_ENV`. The build refuses to run half-configured (see "Configuration and secrets").
-6. After a deploy, run the manual QA checklist in `docs/QA.md` on staging before promoting.
-
-What can't be checked from the repository and stays a manual verification per project: the
-Auth URL settings, SMTP, email templates, that Turnstile's widget allows the right hostname, and
-that the Resend sending domain is verified (send yourself an invitation on staging).
+must stay separate. Migrations are never applied by hand in a dashboard.
 
 ### Database connections
 
@@ -796,49 +888,64 @@ table and feature from now on follows these rules, so snapshots don't need a rew
 
 ## Decision log
 
-| #   | Decision                                                                           | Why                                                                                                                                                                                                                                               |
-| --- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Modular monolith on Next.js + Supabase                                             | One deployable for a solo founder; features are isolated by folder, not by network hop.                                                                                                                                                           |
-| 2   | RLS is the tenant-isolation boundary                                               | Isolation holds even if app code has a bug or a new query forgets a filter.                                                                                                                                                                       |
-| 3   | Authorization helpers are `SECURITY DEFINER` in a non-exposed `private` schema     | Avoids RLS recursion on `workspace_members`, keeps helpers off the REST API, and gives one place to change policy logic.                                                                                                                          |
-| 4   | Membership writes only via SQL functions                                           | Guarantees "every workspace has an owner" and blocks self-joining or unconsented adds.                                                                                                                                                            |
-| 5   | Workspace in the URL, not a cookie                                                 | Shareable links, multi-tab safety, no stale context.                                                                                                                                                                                              |
-| 6   | ~~Passwordless email auth~~ Superseded by 13 (Sprint 1)                            | Product requirement: email + password with reset. Supabase stores the hashes; the flows below keep the risk contained.                                                                                                                            |
-| 7   | Proxy is not a security boundary                                                   | Proxy/middleware has had bypass CVEs. Every layer re-verifies.                                                                                                                                                                                    |
-| 8   | RLS tested on PGlite (Postgres in WASM)                                            | Runs real migrations and real policies under real roles in about 2s with no Docker. Fast enough to run on every commit.                                                                                                                           |
-| 9   | No Sentry/PostHog SDKs yet; interfaces only                                        | "No library without a requirement." Call sites already use the seams, so adoption is a one-file change.                                                                                                                                           |
-| 10  | shadcn/ui on Base UI with the `cn` package                                         | This is the current shadcn default, so future `shadcn add` output matches. `cn` is pinned exactly because it's pre-1.0.                                                                                                                           |
-| 11  | Hand-written logger instead of pino                                                | pino needs bundler workarounds in Next.js; the requirement (structured JSON plus redaction) is about 100 lines.                                                                                                                                   |
-| 12  | npm (not pnpm)                                                                     | Zero extra tooling locally, on Vercel or in CI.                                                                                                                                                                                                   |
-| 13  | Email + password auth; first workspace created in onboarding, not at signup        | Sprint 1 requirement. Users name their workspace (and URL) instead of getting "Jane's workspace"; "no membership" = "needs onboarding", so no flag to drift.                                                                                      |
-| 14  | Slug generation in SQL (`create_workspace`), mirrored in TS only for previews      | Uniqueness needs a global view that RLS hides from users; generating in the definer function avoids an "is this slug taken?" endpoint that would leak other tenants.                                                                              |
-| 15  | Reserved slugs enforced by a CHECK constraint                                      | Keeps `www`, `app`, `api`, … free for routes and future subdomains, whichever code path writes the row.                                                                                                                                           |
-| 16  | Reset password only in a recent email-link session (JWT `amr`)                     | Otherwise `/reset-password` would be a "change password without the current one" backdoor for any stolen session. Accepts `recovery`, `otp` and `magiclink`, because the method depends on the link style.                                        |
-| 17  | Verify the current password on a detached client                                   | Supabase only enforces the current password via a project setting; checking in the app works everywhere without touching the user's session.                                                                                                      |
-| 18  | Last workspace remembered in a user-scoped cookie written by the page              | Restores the right workspace after sign-in without a DB write per navigation; the proxy would also see prefetches. Validated against memberships, never trusted.                                                                                  |
-| 19  | Toasts on Base UI Toast, no `sonner`                                               | Requirement met with a dependency we already ship ("no new dependency without a requirement").                                                                                                                                                    |
-| 20  | Authenticated E2E against a real local Supabase in CI                              | Tests Auth + PostgREST + RLS exactly as deployed. Locally it needs Docker; without it the suite skips (CI sets `E2E_REQUIRE_SUPABASE=1` to fail instead).                                                                                         |
-| 21  | Pin PostgREST v16.3 locally/in CI and retry PGRST303 in the app                    | The pin removes the root cause where we control the stack (a single delayed retry proved insufficient in CI); the retry protects hosted projects, where users reported the same error. Both are removable once PostgREST ≥ 16.3 ships everywhere. |
-| 22  | Agencies and clients are workspaces, one level deep                                | Reuses the workspace/membership model, RLS and guards instead of an organisations layer. Depth 1 covers agency → client; arbitrary trees would make every access check recursive.                                                                 |
-| 23  | Hierarchy invariants as constraints, not triggers                                  | A CHECK plus a composite foreign key to (id, 'agency') enforce "clients have an agency parent, agencies have none, depth 1" for every writer and under concurrency; RESTRICT stops an agency delete from cascading into its clients.              |
-| 24  | Agency owners/admins inherit their role in clients; agency members inherit nothing | Matches how agencies work (managers run client accounts, staff get added explicitly). Implemented in `user_workspace_ids()`/`workspace_role()`, so every policy follows it.                                                                       |
-| 25  | Effective role via the `viewer_role` computed field                                | The inner join on `workspace_members` couldn't see inherited access. A PostgREST computed field keeps one typed query, with RLS still deciding visibility.                                                                                        |
-| 26  | IANA time zone ids, validated in SQL, from a static canonical list                 | Offsets lose daylight saving. A committed list keeps server and browsers in agreement (runtimes disagree on legacy ids and labels).                                                                                                               |
-| 27  | Structured address and named brand colour columns, E.164 phones                    | Messaging compliance, schema.org data and SMS providers need the parts; JSON blobs would dodge constraints (snapshot rule 5).                                                                                                                     |
-| 28  | App-level auth rate limits behind a store interface, Postgres first                | Supabase sees our server's IP for every user. Postgres counters need no new vendor, secret or package, work in every environment and are tested end to end; Redis can replace them by adding one store.                                           |
-| 29  | Turnstile verified by our Server Actions, not Supabase-native CAPTCHA              | Lets us protect sign-up and reset without forcing CAPTCHA on every sign-in and on the password re-check; keeps verification testable without Cloudflare.                                                                                          |
-| 30  | `APP_ENV` plus build-time deployment validation                                    | A staging or production deploy without CAPTCHA, rate-limit storage or https must fail the build, not run half-protected. Vercel deploys can't claim to be local.                                                                                  |
-| 31  | Hosted Auth settings verified from outside (`verify:hosted`)                       | Email confirmation and JWT signing keys are dashboard settings the repo can't set; public Auth endpoints reveal both, so the deploy workflow checks them.                                                                                         |
-| 32  | No new dependencies in Sprint 2                                                    | Searchable selects use Base UI's Combobox (already installed); Turnstile and siteverify need no SDK; the rate limiter needs no Redis client.                                                                                                      |
-| 33  | Invitation writes only through definer functions; no table write grants            | Role ceilings, "already a member", one-open-per-address and token rotation are rules RLS can't express cleanly; functions keep them atomic and testable, as memberships already were (decision 4).                                                |
-| 34  | Store SHA-256 of a 256-bit token, not the token                                    | A database leak can't be replayed into access. A slow KDF adds nothing for a full-entropy secret; lookup by indexed hash in Postgres avoids app-side comparisons.                                                                                 |
-| 35  | Acceptance requires the token **and** the verified invited email                   | The token proves intent, Supabase Auth proves identity; either alone could let the wrong person in (a forwarded email, or an unconfirmed sign-up for someone else's address).                                                                     |
-| 36  | Invitations grant member or admin only                                             | No ownership-transfer flow exists yet; making "owner" a casual choice would let a client's contact delete agency-managed work.                                                                                                                    |
-| 37  | Client workspaces start with no direct members                                     | Agency owners and admins reach clients by inheritance, so removing someone from the agency removes their client access too; the client's own people join by invitation.                                                                           |
-| 38  | Client names unique per agency                                                     | Two identically named clients confuse everyone, and the constraint turns a double-submitted "Add client" into an error rather than a duplicate.                                                                                                   |
-| 39  | Email sent after commit, delivery recorded per token                               | A provider outage must not lose or corrupt an invitation; recording by token means a late result for a replaced link can't overwrite the current one. A job queue can take over without changing callers.                                         |
-| 40  | Resend via REST + Mailpit locally, no SDK                                          | One POST needs no dependency; Mailpit ships with the local Supabase stack, so dev and CI capture mail without secrets or third parties.                                                                                                           |
-| 41  | Pending-invitation cookie to survive email confirmation                            | The token_hash confirmation template always returns to `/dashboard`; an opaque, httpOnly reference (re-validated on use) keeps the invitee's context without trusting any workspace data from the browser.                                        |
-| 42  | Minimal append-only audit log now                                                  | Membership changes are the most security-sensitive writes so far; a trigger-fed private table is small, catches every write path, and gives a UI or export something to read later.                                                               |
-| 43  | Switcher lists at most 20 clients                                                  | Agencies can have hundreds of clients; the Clients page (search, paging) is the place to find them, and the switcher stays one fast query.                                                                                                        |
-| 44  | No new dependencies in Sprint 3                                                    | Dialog, AlertDialog and Textarea are shadcn components on Base UI (installed); the email transport is `fetch`; no email or templating library.                                                                                                    |
+| #   | Decision                                                                                                             | Why                                                                                                                                                                                                                                               |
+| --- | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Modular monolith on Next.js + Supabase                                                                               | One deployable for a solo founder; features are isolated by folder, not by network hop.                                                                                                                                                           |
+| 2   | RLS is the tenant-isolation boundary                                                                                 | Isolation holds even if app code has a bug or a new query forgets a filter.                                                                                                                                                                       |
+| 3   | Authorization helpers are `SECURITY DEFINER` in a non-exposed `private` schema                                       | Avoids RLS recursion on `workspace_members`, keeps helpers off the REST API, and gives one place to change policy logic.                                                                                                                          |
+| 4   | Membership writes only via SQL functions                                                                             | Guarantees "every workspace has an owner" and blocks self-joining or unconsented adds.                                                                                                                                                            |
+| 5   | Workspace in the URL, not a cookie                                                                                   | Shareable links, multi-tab safety, no stale context.                                                                                                                                                                                              |
+| 6   | ~~Passwordless email auth~~ Superseded by 13 (Sprint 1)                                                              | Product requirement: email + password with reset. Supabase stores the hashes; the flows below keep the risk contained.                                                                                                                            |
+| 7   | Proxy is not a security boundary                                                                                     | Proxy/middleware has had bypass CVEs. Every layer re-verifies.                                                                                                                                                                                    |
+| 8   | RLS tested on PGlite (Postgres in WASM)                                                                              | Runs real migrations and real policies under real roles in about 2s with no Docker. Fast enough to run on every commit.                                                                                                                           |
+| 9   | No Sentry/PostHog SDKs yet; interfaces only                                                                          | "No library without a requirement." Call sites already use the seams, so adoption is a one-file change.                                                                                                                                           |
+| 10  | shadcn/ui on Base UI with the `cn` package                                                                           | This is the current shadcn default, so future `shadcn add` output matches. `cn` is pinned exactly because it's pre-1.0.                                                                                                                           |
+| 11  | Hand-written logger instead of pino                                                                                  | pino needs bundler workarounds in Next.js; the requirement (structured JSON plus redaction) is about 100 lines.                                                                                                                                   |
+| 12  | npm (not pnpm)                                                                                                       | Zero extra tooling locally, on Vercel or in CI.                                                                                                                                                                                                   |
+| 13  | Email + password auth; first workspace created in onboarding, not at signup                                          | Sprint 1 requirement. Users name their workspace (and URL) instead of getting "Jane's workspace"; "no membership" = "needs onboarding", so no flag to drift.                                                                                      |
+| 14  | Slug generation in SQL (`create_workspace`), mirrored in TS only for previews                                        | Uniqueness needs a global view that RLS hides from users; generating in the definer function avoids an "is this slug taken?" endpoint that would leak other tenants.                                                                              |
+| 15  | Reserved slugs enforced by a CHECK constraint                                                                        | Keeps `www`, `app`, `api`, … free for routes and future subdomains, whichever code path writes the row.                                                                                                                                           |
+| 16  | Reset password only in a recent email-link session (JWT `amr`)                                                       | Otherwise `/reset-password` would be a "change password without the current one" backdoor for any stolen session. Accepts `recovery`, `otp` and `magiclink`, because the method depends on the link style.                                        |
+| 17  | Verify the current password on a detached client                                                                     | Supabase only enforces the current password via a project setting; checking in the app works everywhere without touching the user's session.                                                                                                      |
+| 18  | Last workspace remembered in a user-scoped cookie written by the page                                                | Restores the right workspace after sign-in without a DB write per navigation; the proxy would also see prefetches. Validated against memberships, never trusted.                                                                                  |
+| 19  | Toasts on Base UI Toast, no `sonner`                                                                                 | Requirement met with a dependency we already ship ("no new dependency without a requirement").                                                                                                                                                    |
+| 20  | Authenticated E2E against a real local Supabase in CI                                                                | Tests Auth + PostgREST + RLS exactly as deployed. Locally it needs Docker; without it the suite skips (CI sets `E2E_REQUIRE_SUPABASE=1` to fail instead).                                                                                         |
+| 21  | Pin PostgREST v16.3 locally/in CI and retry PGRST303 in the app                                                      | The pin removes the root cause where we control the stack (a single delayed retry proved insufficient in CI); the retry protects hosted projects, where users reported the same error. Both are removable once PostgREST ≥ 16.3 ships everywhere. |
+| 22  | Agencies and clients are workspaces, one level deep                                                                  | Reuses the workspace/membership model, RLS and guards instead of an organisations layer. Depth 1 covers agency → client; arbitrary trees would make every access check recursive.                                                                 |
+| 23  | Hierarchy invariants as constraints, not triggers                                                                    | A CHECK plus a composite foreign key to (id, 'agency') enforce "clients have an agency parent, agencies have none, depth 1" for every writer and under concurrency; RESTRICT stops an agency delete from cascading into its clients.              |
+| 24  | Agency owners/admins inherit their role in clients; agency members inherit nothing                                   | Matches how agencies work (managers run client accounts, staff get added explicitly). Implemented in `user_workspace_ids()`/`workspace_role()`, so every policy follows it.                                                                       |
+| 25  | Effective role via the `viewer_role` computed field                                                                  | The inner join on `workspace_members` couldn't see inherited access. A PostgREST computed field keeps one typed query, with RLS still deciding visibility.                                                                                        |
+| 26  | IANA time zone ids, validated in SQL, from a static canonical list                                                   | Offsets lose daylight saving. A committed list keeps server and browsers in agreement (runtimes disagree on legacy ids and labels).                                                                                                               |
+| 27  | Structured address and named brand colour columns, E.164 phones                                                      | Messaging compliance, schema.org data and SMS providers need the parts; JSON blobs would dodge constraints (snapshot rule 5).                                                                                                                     |
+| 28  | App-level auth rate limits behind a store interface, Postgres first                                                  | Supabase sees our server's IP for every user. Postgres counters need no new vendor, secret or package, work in every environment and are tested end to end; Redis can replace them by adding one store.                                           |
+| 29  | Turnstile verified by our Server Actions, not Supabase-native CAPTCHA                                                | Lets us protect sign-up and reset without forcing CAPTCHA on every sign-in and on the password re-check; keeps verification testable without Cloudflare.                                                                                          |
+| 30  | `APP_ENV` plus build-time deployment validation                                                                      | A staging or production deploy without CAPTCHA, rate-limit storage or https must fail the build, not run half-protected. Vercel deploys can't claim to be local.                                                                                  |
+| 31  | Hosted Auth settings verified from outside (`verify:hosted`)                                                         | Email confirmation and JWT signing keys are dashboard settings the repo can't set; public Auth endpoints reveal both, so the deploy workflow checks them.                                                                                         |
+| 32  | No new dependencies in Sprint 2                                                                                      | Searchable selects use Base UI's Combobox (already installed); Turnstile and siteverify need no SDK; the rate limiter needs no Redis client.                                                                                                      |
+| 33  | Invitation writes only through definer functions; no table write grants                                              | Role ceilings, "already a member", one-open-per-address and token rotation are rules RLS can't express cleanly; functions keep them atomic and testable, as memberships already were (decision 4).                                                |
+| 34  | Store SHA-256 of a 256-bit token, not the token                                                                      | A database leak can't be replayed into access. A slow KDF adds nothing for a full-entropy secret; lookup by indexed hash in Postgres avoids app-side comparisons.                                                                                 |
+| 35  | Acceptance requires the token **and** the verified invited email                                                     | The token proves intent, Supabase Auth proves identity; either alone could let the wrong person in (a forwarded email, or an unconfirmed sign-up for someone else's address).                                                                     |
+| 36  | Invitations grant member or admin only                                                                               | No ownership-transfer flow exists yet; making "owner" a casual choice would let a client's contact delete agency-managed work.                                                                                                                    |
+| 37  | Client workspaces start with no direct members                                                                       | Agency owners and admins reach clients by inheritance, so removing someone from the agency removes their client access too; the client's own people join by invitation.                                                                           |
+| 38  | Client names unique per agency                                                                                       | Two identically named clients confuse everyone, and the constraint turns a double-submitted "Add client" into an error rather than a duplicate.                                                                                                   |
+| 39  | Email sent after commit, delivery recorded per token                                                                 | A provider outage must not lose or corrupt an invitation; recording by token means a late result for a replaced link can't overwrite the current one. A job queue can take over without changing callers.                                         |
+| 40  | Resend via REST + Mailpit locally, no SDK                                                                            | One POST needs no dependency; Mailpit ships with the local Supabase stack, so dev and CI capture mail without secrets or third parties.                                                                                                           |
+| 41  | Pending-invitation cookie to survive email confirmation                                                              | The token_hash confirmation template always returns to `/dashboard`; an opaque, httpOnly reference (re-validated on use) keeps the invitee's context without trusting any workspace data from the browser.                                        |
+| 42  | Minimal append-only audit log now                                                                                    | Membership changes are the most security-sensitive writes so far; a trigger-fed private table is small, catches every write path, and gives a UI or export something to read later.                                                               |
+| 43  | Switcher lists at most 20 clients                                                                                    | Agencies can have hundreds of clients; the Clients page (search, paging) is the place to find them, and the switcher stays one fast query.                                                                                                        |
+| 44  | No new dependencies in Sprint 3                                                                                      | Dialog, AlertDialog and Textarea are shadcn components on Base UI (installed); the email transport is `fetch`; no email or templating library.                                                                                                    |
+| 45  | Ownership granted only by two definer functions; a direct `UPDATE … role = 'owner'` is refused                       | Every grant is checked (direct owner, same-workspace member, clients only for make-owner) and audited as one event; Sprint 0 let owners promote by update, which bypassed both. Demoting stays an update.                                         |
+| 46  | Transfer for direct owners; make-owner for client owners (incl. inherited)                                           | Agency owners own clients without a row to hand over; make-owner lets a client's representative take ownership without the agency stepping down, while agencies keep the explicit transfer.                                                       |
+| 47  | Client continuity in `protect_last_owner`, requiring a real agency owner                                             | Agency owners own their clients, so a client needn't keep a direct owner; putting it in the trigger covers every write path. Requiring an actual agency owner keeps the fallback honest after account deletions.                                  |
+| 48  | One audit event per ownership change (transaction-local flag)                                                        | The two role updates behind a transfer would otherwise log two confusing rows; only the definer functions set the flag, and clients can't set settings through the Data API.                                                                      |
+| 49  | Audit log read through a definer function with an allowlisted `details` object                                       | The table stays private and append-only; readers get names and sentences, never ids, tokens or raw JSON. Keyset paging by event id scales with the log.                                                                                           |
+| 50  | Audit retention of one year as policy, cleanup deferred                                                              | Deleting evidence is irreversible; building the job alongside the scheduler infrastructure is safer than a one-off now.                                                                                                                           |
+| 51  | Pending invitations by verified email; one shared acceptance routine                                                 | Covers confirming on another device without trusting anything from the browser; sharing the core keeps the checks, lock and audit identical, and the id path reveals nothing to non-invitees.                                                     |
+| 52  | Leaving is a delete of your own row under RLS                                                                        | The policy and the last-owner trigger already express the rules; a new function would duplicate them.                                                                                                                                             |
+| 53  | Staging = its own Vercel project deploying `main`, gated by Vercel Deployment Checks; production by manual promotion | Uses Vercel's Git integration instead of custom deploy code; CI must pass before a commit reaches staging; production never changes without a person.                                                                                             |
+| 54  | Staging runs Cloudflare's always-pass Turnstile test keys                                                            | Exercises the real widget and `siteverify` in automated runs; the build already rejects them in production.                                                                                                                                       |
+| 55  | `verify:hosted` is the hosted gate; `/api/health` names its environment                                              | Checks what's visible from outside without secrets and fails loudly; the environment field lets gates and the smoke prove they reached staging before creating anything.                                                                          |
+| 56  | E2E target guards: local suites loopback-only, staging smoke exact-URL + health                                      | The suites create and delete users with a secret key; a mistyped URL must stop the run, not touch production.                                                                                                                                     |
+| 57  | CI `database` job (db lint, type drift) and a CI-only confirmation config edit                                       | Catches Supabase-specific schema issues and drift PGlite can't; the CLI doesn't document env overrides for `enable_confirmations`, so a section-aware edit of the runner's checkout is explicit and tested.                                       |
+| 58  | Client search over name, business name, email and phone in one quoted `or` filter                                    | A small change inside `listClients`; quoting keeps user text out of the filter syntax; phones match by digits.                                                                                                                                    |
+| 59  | No new dependencies in Sprint 4                                                                                      | Dialogs, forms and tables reuse installed components; scripts use Node built-ins, the pinned Supabase CLI, Prettier and supabase-js already in the tree.                                                                                          |
