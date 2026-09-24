@@ -292,7 +292,7 @@ describe("agency roles in client workspaces (write policies)", () => {
     expect(agency.affectedRows).toBe(0)
   })
 
-  it("lets agency admins change client roles below owner; only agency owners grant ownership", async () => {
+  it("lets agency admins change client roles below owner; only agency owners grant ownership (through make_workspace_owner)", async () => {
     const t = await setupAgency()
     const promote = await db.asUser(t.agencyAdmin, (tx) =>
       tx.query(
@@ -311,13 +311,23 @@ describe("agency roles in client workspaces (write policies)", () => {
       )
     ).rejects.toThrow(/row-level security/)
 
-    const byOwner = await db.asUser(t.agencyOwner, (tx) =>
-      tx.query(
-        "update public.workspace_members set role = 'owner' where workspace_id = $1 and user_id = $2",
-        [t.clientA.id, t.clientMember]
+    // Sprint 4: ownership is granted only by the audited functions, never by a
+    // direct update, not even by an owner.
+    await expect(
+      db.asUser(t.agencyOwner, (tx) =>
+        tx.query(
+          "update public.workspace_members set role = 'owner' where workspace_id = $1 and user_id = $2",
+          [t.clientA.id, t.clientMember]
+        )
       )
+    ).rejects.toThrow(/row-level security/)
+    const byOwner = await db.asUser(t.agencyOwner, (tx) =>
+      tx.query<{ outcome: string }>("select public.make_workspace_owner($1, $2) as outcome", [
+        t.clientA.id,
+        t.clientMember,
+      ])
     )
-    expect(byOwner.affectedRows).toBe(1)
+    expect(byOwner.rows[0]?.outcome).toBe("granted")
   })
 
   it("only agency owners (as effective owners) can delete a client workspace", async () => {

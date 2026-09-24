@@ -2,16 +2,17 @@
 
 Supabase Postgres 17. The schema's source of truth is `supabase/migrations/`; this document
 explains it. So far there is the tenancy core (profiles, workspaces with the agency → client
-hierarchy and business profile, memberships, invitations), the membership audit log and the
-auth rate-limit counters; product tables arrive with their features.
+hierarchy and business profile, memberships, invitations), ownership functions, the membership audit
+log (with its read path) and the auth rate-limit counters; product tables arrive with their features.
 
-| Migration                                              | Sprint | What it does                                                                                                                       |
-| ------------------------------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `20260918000000_tenancy_foundation.sql`                | 0      | Tables, RLS, grants, private helpers, triggers, `create_workspace()`.                                                              |
-| `20260918120000_onboarding_workspace_creation.sql`     | 1      | Signup creates the profile only; `create_workspace()` can generate the slug; reserved slugs rejected.                              |
-| `20260923000000_workspace_hierarchy_and_profiles.sql`  | 2      | Agency/client hierarchy and access rule, workspace time zone + business profile, profile phone/time zone/locale, `viewer_role`.    |
-| `20260923000100_auth_rate_limits.sql`                  | 2      | `private.rate_limit_counters` + service-role-only `rate_limit_hit()` for app-level auth rate limits.                               |
-| `20260923120000_client_workspaces_and_invitations.sql` | 3      | `create_client_workspace()`, `workspace_invitations` + its functions, `private.audit_log`, `website_url`, client-name key, counts. |
+| Migration                                                    | Sprint | What it does                                                                                                                                                     |
+| ------------------------------------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `20260918000000_tenancy_foundation.sql`                      | 0      | Tables, RLS, grants, private helpers, triggers, `create_workspace()`.                                                                                            |
+| `20260918120000_onboarding_workspace_creation.sql`           | 1      | Signup creates the profile only; `create_workspace()` can generate the slug; reserved slugs rejected.                                                            |
+| `20260923000000_workspace_hierarchy_and_profiles.sql`        | 2      | Agency/client hierarchy and access rule, workspace time zone + business profile, profile phone/time zone/locale, `viewer_role`.                                  |
+| `20260923000100_auth_rate_limits.sql`                        | 2      | `private.rate_limit_counters` + service-role-only `rate_limit_hit()` for app-level auth rate limits.                                                             |
+| `20260923120000_client_workspaces_and_invitations.sql`       | 3      | `create_client_workspace()`, `workspace_invitations` + its functions, `private.audit_log`, `website_url`, client-name key, counts.                               |
+| `20260924120000_ownership_audit_and_pending_invitations.sql` | 4      | Ownership transfer / make-owner, client continuity in `protect_last_owner`, no owner grants by update, audit read path, pending invitations + shared acceptance. |
 
 ## Schema
 
@@ -92,33 +93,39 @@ erDiagram
 
 ### Functions and triggers
 
-| Name                                              | Kind                                 | Behaviour                                                                                                    |
-| ------------------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
-| `private.user_workspace_ids()`                    | helper, definer                      | Workspaces the caller can access: direct memberships **plus** clients of agencies where they're admin/owner. |
-| `private.workspace_role(ws)`                      | helper, definer                      | The caller's effective role in `ws` (direct, or inherited from its agency), or null.                         |
-| `private.has_workspace_role(ws, min_role)`        | helper, definer                      | True when the caller's effective role in `ws` is at least `min_role`.                                        |
-| `public.viewer_role(workspaces)`                  | computed field, invoker              | `select=…,viewer_role` returns the caller's effective role per visible workspace.                            |
-| `public.create_workspace(name, slug?, timezone?)` | RPC, definer                         | Creates an **agency** workspace and makes the caller owner, atomically. The only client path to create one.  |
-| `public.create_client_workspace(agency, name, …)` | RPC, definer                         | Creates a **client** (with its business profile) under an agency the caller owns or administers. See below.  |
-| `public.create_workspace_invitation(…)`           | RPC, definer                         | Invites an address (admin+); returns `created` / `already_pending` / `already_member`. See "Invitations".    |
-| `public.resend_workspace_invitation(…)`           | RPC, definer                         | Rotates an open invitation's token and resets its expiry (admin+).                                           |
-| `public.revoke_workspace_invitation(…)`           | RPC, definer                         | Revokes an open invitation (admin+), idempotently; the row is kept.                                          |
-| `public.record_workspace_invitation_delivery(…)`  | RPC, definer                         | Records whether the email for the invitation's **current** token went out.                                   |
-| `public.get_workspace_invitation(token_hash)`     | RPC, definer, **anon** too           | The public preview behind `/invite/<token>`: status and display fields, no ids.                              |
-| `public.accept_workspace_invitation(token_hash)`  | RPC, definer                         | Joins the signed-in, verified invitee to the invited workspace, atomically.                                  |
-| `public.member_count(workspaces)`                 | computed field, invoker              | Direct members of a workspace (as visible to the caller). Used by the client list.                           |
-| `public.pending_invitation_count(workspaces)`     | computed field, invoker              | Open, unexpired invitations (visible to owners and admins only, by RLS).                                     |
-| `public.rate_limit_hit(key, window)`              | RPC, definer, service_role only      | Counts one hit for a rate-limit key and returns hits and window end.                                         |
-| `private.write_audit_event(…)`                    | helper, definer                      | Appends to `private.audit_log` as `auth.uid()`. Called by definer code only.                                 |
-| `private.audit_membership_change()`               | trigger on `workspace_members`       | Logs member added, role changed, removed or left (skips cascades).                                           |
-| `private.workspace_slug_candidate(name, attempt)` | helper                               | The slug to try on an attempt: the plain slug, then with a random suffix (as in `create_workspace`).         |
-| `private.is_valid_timezone(text)`                 | helper, stable                       | True for IANA `Area/Location` names Postgres knows, and `UTC`. Used by CHECKs.                               |
-| `private.handle_new_user()`                       | trigger on `auth.users` insert       | Creates the profile only (display fields from metadata, clipped to the column limits).                       |
-| `private.slugify(text)`                           | helper, immutable                    | `'Café Münster & Co.'` → `'cafe-munster-co'`: NFKD accent folding, then non-alphanumerics → `-`.             |
-| `private.is_reserved_workspace_slug(text)`        | helper, immutable                    | True for slugs kept for routes and subdomains (`www`, `app`, `api`, `admin`, `settings`, …).                 |
-| `private.handle_user_email_change()`              | trigger on `auth.users` email update | Keeps `profiles.email` in sync.                                                                              |
-| `private.protect_last_owner()`                    | trigger on `workspace_members`       | Blocks demoting or removing the last owner, and locks the workspace row to prevent races. Allows cascades.   |
-| `private.set_updated_at()`                        | trigger                              | Maintains `updated_at` on every table.                                                                       |
+| Name                                              | Kind                                 | Behaviour                                                                                                                                                      |
+| ------------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `private.user_workspace_ids()`                    | helper, definer                      | Workspaces the caller can access: direct memberships **plus** clients of agencies where they're admin/owner.                                                   |
+| `private.workspace_role(ws)`                      | helper, definer                      | The caller's effective role in `ws` (direct, or inherited from its agency), or null.                                                                           |
+| `private.has_workspace_role(ws, min_role)`        | helper, definer                      | True when the caller's effective role in `ws` is at least `min_role`.                                                                                          |
+| `public.viewer_role(workspaces)`                  | computed field, invoker              | `select=…,viewer_role` returns the caller's effective role per visible workspace.                                                                              |
+| `public.create_workspace(name, slug?, timezone?)` | RPC, definer                         | Creates an **agency** workspace and makes the caller owner, atomically. The only client path to create one.                                                    |
+| `public.create_client_workspace(agency, name, …)` | RPC, definer                         | Creates a **client** (with its business profile) under an agency the caller owns or administers. See below.                                                    |
+| `public.create_workspace_invitation(…)`           | RPC, definer                         | Invites an address (admin+); returns `created` / `already_pending` / `already_member`. See "Invitations".                                                      |
+| `public.resend_workspace_invitation(…)`           | RPC, definer                         | Rotates an open invitation's token and resets its expiry (admin+).                                                                                             |
+| `public.revoke_workspace_invitation(…)`           | RPC, definer                         | Revokes an open invitation (admin+), idempotently; the row is kept.                                                                                            |
+| `public.record_workspace_invitation_delivery(…)`  | RPC, definer                         | Records whether the email for the invitation's **current** token went out.                                                                                     |
+| `public.get_workspace_invitation(token_hash)`     | RPC, definer, **anon** too           | The public preview behind `/invite/<token>`: status and display fields, no ids.                                                                                |
+| `public.accept_workspace_invitation(token_hash)`  | RPC, definer                         | Joins the signed-in, verified invitee to the invited workspace, atomically (via `private.accept_invitation`).                                                  |
+| `public.accept_workspace_invitation_by_id(id)`    | RPC, definer                         | Same, by id, for the caller's pending list; answers `invalid` to anyone but the verified invitee.                                                              |
+| `public.list_my_pending_invitations()`            | RPC, definer                         | Open, unexpired invitations for the caller's **verified** email: display fields and id, no token hash.                                                         |
+| `private.accept_invitation(id, token_hash)`       | helper, definer                      | The one acceptance routine: lock, checks, membership, accepted mark, audit. Both public paths call it.                                                         |
+| `public.transfer_workspace_ownership(ws, user)`   | RPC, definer                         | A **direct** owner makes a direct member owner and becomes admin, atomically, rows locked. See below.                                                          |
+| `public.make_workspace_owner(ws, user)`           | RPC, definer                         | **Client** workspaces: an owner (direct or via the agency) makes a direct member an owner. See below.                                                          |
+| `public.list_workspace_audit_events(ws, …)`       | RPC, definer                         | One workspace's audit events for its owners and admins: keyset paging, filters, names, no ids. See below.                                                      |
+| `public.member_count(workspaces)`                 | computed field, invoker              | Direct members of a workspace (as visible to the caller). Used by the client list.                                                                             |
+| `public.pending_invitation_count(workspaces)`     | computed field, invoker              | Open, unexpired invitations (visible to owners and admins only, by RLS).                                                                                       |
+| `public.rate_limit_hit(key, window)`              | RPC, definer, service_role only      | Counts one hit for a rate-limit key and returns hits and window end.                                                                                           |
+| `private.write_audit_event(…)`                    | helper, definer                      | Appends to `private.audit_log` as `auth.uid()`. Called by definer code only.                                                                                   |
+| `private.audit_membership_change()`               | trigger on `workspace_members`       | Logs member added, role changed, removed or left (skips cascades).                                                                                             |
+| `private.workspace_slug_candidate(name, attempt)` | helper                               | The slug to try on an attempt: the plain slug, then with a random suffix (as in `create_workspace`).                                                           |
+| `private.is_valid_timezone(text)`                 | helper, stable                       | True for IANA `Area/Location` names Postgres knows, and `UTC`. Used by CHECKs.                                                                                 |
+| `private.handle_new_user()`                       | trigger on `auth.users` insert       | Creates the profile only (display fields from metadata, clipped to the column limits).                                                                         |
+| `private.slugify(text)`                           | helper, immutable                    | `'Café Münster & Co.'` → `'cafe-munster-co'`: NFKD accent folding, then non-alphanumerics → `-`.                                                               |
+| `private.is_reserved_workspace_slug(text)`        | helper, immutable                    | True for slugs kept for routes and subdomains (`www`, `app`, `api`, `admin`, `settings`, …).                                                                   |
+| `private.handle_user_email_change()`              | trigger on `auth.users` email update | Keeps `profiles.email` in sync.                                                                                                                                |
+| `private.protect_last_owner()`                    | trigger on `workspace_members`       | Blocks demoting or removing the last owner (a client's last **direct** owner may go when its agency has an owner), locking the workspace row. Allows cascades. |
+| `private.set_updated_at()`                        | trigger                              | Maintains `updated_at` on every table.                                                                                                                         |
 
 All definer functions pin `search_path = ''` and schema-qualify every reference.
 
@@ -240,7 +247,10 @@ scheduler.
   (`member < admin < owner`). The creator of a workspace is its owner.
 - **Onboarding invariant**: a user with no membership is sent to onboarding. Signup no longer
   creates a workspace, so the first one is always named by the user.
-- A workspace always keeps at least one owner (`protect_last_owner` trigger).
+- An agency always keeps at least one direct owner (`protect_last_owner` trigger). A client keeps
+  one too, unless its agency has an owner (the client continuity rule, Sprint 4).
+- Ownership is granted only by `transfer_workspace_ownership` and `make_workspace_owner`; the
+  update policy refuses `role = 'owner'` (Sprint 4). Owners still demote owners by update.
 - Memberships are created only by definer functions: `create_workspace()` (the creator) and
   `accept_workspace_invitation()` (everyone else). There is no `INSERT` grant, so nobody can add
   themselves or anyone else directly. Client workspaces start with no direct members.
@@ -256,9 +266,9 @@ Grants are least-privilege. RLS then limits _which rows_ a granted verb can touc
 | ----------------------- | ------ | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `profiles`              | none   | `SELECT`; `UPDATE (full_name, avatar_url, phone, timezone, locale)`           | Read self and co-members of any accessible workspace. Update self only.                                                                                                     |
 | `workspaces`            | none   | `SELECT`; `UPDATE (name, slug, timezone, business profile columns)`; `DELETE` | Read if accessible. Update if admin or above. Delete if owner. No `INSERT` (use `create_workspace` / `create_client_workspace`); no update of type, parent or `created_by`. |
-| `workspace_members`     | none   | `SELECT`; `UPDATE (role)`; `DELETE`                                           | Read co-members. Admins change roles and remove members, but only owners touch owner rows. Anyone can leave. No `INSERT`.                                                   |
+| `workspace_members`     | none   | `SELECT`; `UPDATE (role)`; `DELETE`                                           | Read co-members. Admins change roles and remove members, but only owners touch owner rows; nobody sets `owner` by update. Anyone can leave. No `INSERT`.                    |
 | `workspace_invitations` | none   | `SELECT` on every column **except `token_hash`**                              | Read if admin or above (incl. agency admins in clients). No `INSERT`/`UPDATE`/`DELETE`: the invitation functions write it.                                                  |
-| `private.audit_log`     | none   | none (`service_role`: `SELECT` only)                                          | RLS on, no policies. Not in an exposed schema.                                                                                                                              |
+| `private.audit_log`     | none   | none (`service_role`: `SELECT` only)                                          | RLS on, no policies. Not in an exposed schema. Read only through `list_workspace_audit_events()` (owners and admins).                                                       |
 
 `service_role` (the secret key) bypasses RLS. See the admin-client rules in `ARCHITECTURE.md`.
 
@@ -301,7 +311,39 @@ Lifecycle:
   invited role (`on conflict do nothing`: an existing member keeps their role and gets
   `already_member`) and sets `accepted_at`/`accepted_by`, in the same transaction. The same person
   accepting again gets `accepted` with the workspace slug (idempotent); anyone else gets
-  `already_used`.
+  `already_used`. Since Sprint 4 the work happens in `private.accept_invitation(id, token_hash)`:
+  the public function looks the id up by hash and passes the hash along, and the routine refuses
+  it (`invalid`) if a resend rotated the token between lookup and lock.
+- **Pending list** (`list_my_pending_invitations`, Sprint 4): the caller's open, unexpired,
+  unrevoked invitations, matched on `lower(btrim(auth.users.email))` and only when
+  `email_confirmed_at` is set. Returns id, workspace name, role, inviter, expiry, created; never
+  the hash. Backed by `workspace_invitations_open_email_idx` (email, open rows only).
+- **Accept by id** (`accept_workspace_invitation_by_id`): the same routine, but first the caller
+  must have a confirmed email equal to the invited one (`email_unverified`, else `invalid` for
+  everyone else, whatever the invitation's state), then the usual outcomes. Audit metadata says
+  `method: link | pending_list`.
+
+## Ownership (Sprint 4)
+
+| Function                                      | Who                                             | Outcomes                                                      |
+| --------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------- |
+| `transfer_workspace_ownership(ws, new_owner)` | a **direct** owner (agency or client)           | `transferred`, `not_member`, `already_owner`, `self`; `42501` |
+| `make_workspace_owner(ws, user)`              | an owner of a **client** (direct or via agency) | `granted`, `not_member`, `already_owner`, `self`; `42501`     |
+
+- Authorization is checked before any lock (outsiders lock nothing), then again under the locks.
+- Transfer locks both membership rows in user-id order, then the workspace row (the order the
+  last-owner trigger uses), promotes the target, then demotes the caller to admin: one
+  transaction, so ownership is never lost or doubled by a race.
+- Make-owner locks the target row, then the workspace row; the caller keeps their role.
+  `42501` for agencies (their owners transfer) and for anyone who isn't an owner.
+- Targets must be direct members of that workspace (`not_member` for invitations, inherited
+  agency roles, other tenants' members, unknown ids).
+- Each writes one audit event, `workspace.ownership_transferred` (metadata `from`, `to`,
+  `previous_owner_role`) or `workspace.owner_granted` (`from`, `to`), and sets the
+  transaction-local `dreamfunnels.ownership_change` flag so the membership trigger doesn't also
+  log the two role updates.
+- `protect_last_owner` keeps agencies owned; for a client it accepts losing the last direct
+  owner when the parent agency has an owner (the client continuity rule).
 
 ## Audit log
 
@@ -319,9 +361,29 @@ deleted with its workspace. Events so far:
 | `workspace.invitation_revoked`        | `revoke_workspace_invitation`            | `invitation_id`                           |
 | `workspace.invitation_accepted`       | `accept_workspace_invitation`            | `invitation_id`, `role`, `already_member` |
 | `workspace.client_created`            | `create_client_workspace` (agency's log) | `client_workspace_id`                     |
+| `workspace.ownership_transferred`     | `transfer_workspace_ownership`           | `from`, `to`, `previous_owner_role`       |
+| `workspace.owner_granted`             | `make_workspace_owner`                   | `from`, `to`                              |
 
+`workspace.invitation_accepted` also carries `method` (`link` or `pending_list`) since Sprint 4.
 `actor_user_id` is `auth.uid()` (null for trusted system code). Tokens, hashes and secrets are
 never logged. Future tables' security events should write here through `write_audit_event`.
+
+**Read path** (Sprint 4): `list_workspace_audit_events(p_workspace_id, p_limit = 50, p_before_id,
+p_event_type, p_actor_id, p_from, p_to)`, a definer function:
+
+- `42501` unless the caller is an owner or admin of the workspace (agency owners and admins for
+  their clients, through `has_workspace_role`); anon can't execute it.
+- Newest first by `(created_at, id)`; `p_before_id` is the last id of the previous page (a cursor
+  from another workspace returns nothing). `p_limit` is clamped to 1–100.
+- `p_from`/`p_to` are calendar days in the workspace's time zone, inclusive.
+- Returns `id`, `created_at`, `event_type`, `actor_name`, `target_name`, `target_email` and
+  `details`: only `role`, `from`, `to`, `previous_owner_role`, `already_member`, `method` and the
+  created client's name. No ids, tokens or hashes.
+- Uses the existing `(workspace_id, created_at desc)` index; the filters narrow within one
+  workspace, so no new index.
+
+**Retention**: one year. Not enforced yet; a scheduled delete of rows older than a year is an
+operational follow-up (`docs/DEPLOYMENT.md`). The table stays append-only for every API role.
 
 ## Conventions for new tables
 
@@ -400,9 +462,10 @@ Notes:
 npm run db:start                       # local Supabase (Docker required)
 npm run db:migration:new add_funnels   # creates supabase/migrations/<timestamp>_add_funnels.sql
 # write SQL, then:
-npm run db:reset                       # re-applies all migrations + seed.sql locally
+npm run db:reset                       # re-applies all migrations + seed.sql (local only: --local)
 npm run test:db                        # RLS suite on PGlite (no Docker needed)
 npm run db:types                       # regenerate src/types/database.types.ts
+npm run db:types:check                 # what CI runs: fails if the types drift from the migrations
 ```
 
 > `src/types/database.types.ts` is generated (first regenerated in Sprint 1; it matched the
@@ -410,26 +473,26 @@ npm run db:types                       # regenerate src/types/database.types.ts
 
 - Migrations are append-only once merged. Fix mistakes with a new migration.
 - Keep migrations deterministic and idempotent where cheap (`if not exists` on extensions and schemas).
-- Deploy with `supabase link --project-ref <ref>` and `supabase db push`, from CI or a release
-  step, staging before production.
+- Deploy with the **Deploy database** workflow (preview, then apply; staging before production;
+  never a reset), see `docs/DEPLOYMENT.md`. CI's `database` job applies every migration from
+  scratch, runs `supabase db lint` and checks type drift on every push.
 - Destructive changes (drop or rename column) take two releases: stop using it, then drop it.
 
 ## Future extension points
 
 These are anticipated tables, sketched so that today's decisions don't block them. They are not built.
 
-| Area            | Likely tables                                             | Notes                                                                                                           |
-| --------------- | --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| Agency clients  | functions on `workspaces`                                 | Move/detach a client: definer functions checking agency admin rights (no column grants). Creation exists.       |
-| Ownership       | a transfer function                                       | Owner hands ownership to a member atomically (promote + demote in one call), respecting the last-owner trigger. |
-| Snapshots       | `snapshots`, `snapshot_items`, `snapshot_deployments`     | Allowlisted, `source_key`-addressed content; deploy remaps ids; never credentials.                              |
-| Funnels & pages | `funnels`, `funnel_steps`, `pages`, `page_versions`       | `pages.content jsonb` + `schema_version`. Versions are immutable snapshots; publishing points at one.           |
-| Publishing      | `sites`, `site_deployments`                               | Public reads through a definer function or view that exposes only published snapshots.                          |
-| Custom domains  | `domains`                                                 | Globally unique hostname, verification status, workspace-scoped management.                                     |
-| Forms           | `forms`, `form_submissions`                               | Anonymous submissions go through a definer function, rate-limited, never with a blanket `anon` grant.           |
-| Contacts        | `contacts`, `contact_events`, `tags`                      | Unique `(workspace_id, lower(email))`, with high-volume indexes led by `workspace_id`.                          |
-| Email           | `email_campaigns`, `email_messages`, `email_suppressions` | Provider message ids plus webhook-driven status updates.                                                        |
-| Automations     | `automations`, `automation_runs`, `jobs`                  | Postgres-backed job queue first (Supabase Queues / `pg_cron`).                                                  |
-| AI              | `ai_generations`, `ai_usage`                              | Prompts and outputs are auditable, with usage metered per workspace for billing.                                |
-| Billing         | `billing_customers`, `subscriptions`, `plan_limits`       | Written only by Stripe webhooks (service role); read by members.                                                |
-| Audit           | (exists: `private.audit_log`)                             | Next: a read path for owners (definer function or view) and a retention policy.                                 |
+| Area            | Likely tables                                             | Notes                                                                                                     |
+| --------------- | --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Agency clients  | functions on `workspaces`                                 | Move/detach a client: definer functions checking agency admin rights (no column grants). Creation exists. |
+| Snapshots       | `snapshots`, `snapshot_items`, `snapshot_deployments`     | Allowlisted, `source_key`-addressed content; deploy remaps ids; never credentials.                        |
+| Funnels & pages | `funnels`, `funnel_steps`, `pages`, `page_versions`       | `pages.content jsonb` + `schema_version`. Versions are immutable snapshots; publishing points at one.     |
+| Publishing      | `sites`, `site_deployments`                               | Public reads through a definer function or view that exposes only published snapshots.                    |
+| Custom domains  | `domains`                                                 | Globally unique hostname, verification status, workspace-scoped management.                               |
+| Forms           | `forms`, `form_submissions`                               | Anonymous submissions go through a definer function, rate-limited, never with a blanket `anon` grant.     |
+| Contacts        | `contacts`, `contact_events`, `tags`                      | Unique `(workspace_id, lower(email))`, with high-volume indexes led by `workspace_id`.                    |
+| Email           | `email_campaigns`, `email_messages`, `email_suppressions` | Provider message ids plus webhook-driven status updates.                                                  |
+| Automations     | `automations`, `automation_runs`, `jobs`                  | Postgres-backed job queue first (Supabase Queues / `pg_cron`).                                            |
+| AI              | `ai_generations`, `ai_usage`                              | Prompts and outputs are auditable, with usage metered per workspace for billing.                          |
+| Billing         | `billing_customers`, `subscriptions`, `plan_limits`       | Written only by Stripe webhooks (service role); read by members.                                          |
+| Audit           | (exists: `private.audit_log` + read path)                 | Next: the one-year retention job, and security events from future tables through `write_audit_event`.     |

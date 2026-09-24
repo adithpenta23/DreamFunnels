@@ -5,15 +5,19 @@ tenant isolation proven by tests rather than assumed.
 
 ## Test pyramid
 
-| Level          | Tool                                           | Location                                                        | Runs                | What belongs here                                                                                             |
-| -------------- | ---------------------------------------------- | --------------------------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------- |
-| Static         | TypeScript strict, ESLint, Prettier            | whole repo                                                      | every commit        | Types, unsafe patterns (raw Supabase clients, `console`), formatting.                                         |
-| Unit           | Vitest (`unit`, node)                          | `src/**/*.test.ts`, `scripts/**`                                | every commit, ~1s   | Pure logic: schemas, guards, redirects, error mapping, slugs, roles, rate limits, time zones.                 |
-| Component      | Vitest (`components`, jsdom) + Testing Library | `src/**/*.test.tsx`                                             | every commit        | Client components' behaviour and accessibility (roles and labels, not CSS).                                   |
-| Database / RLS | Vitest (`db`) + PGlite                         | `supabase/tests/**/*.test.ts`                                   | every commit, ~2s   | Real migrations and real policies under real roles: isolation, grants, triggers, constraints.                 |
-| E2E smoke      | Playwright (Chromium)                          | `e2e/smoke.spec.ts`                                             | every run           | Public surface, guards, validation and error paths. **Needs no Supabase.**                                    |
-| E2E flows      | Playwright (Chromium) + local Supabase         | `e2e/auth.spec.ts`, `workspaces.spec.ts`, `invitations.spec.ts` | CI; local w/ Docker | Signed-in journeys through real Auth, PostgREST, RLS and email (Mailpit): signup → onboarding → dashboard → … |
-| API races      | Playwright (no browser) + local Supabase       | `e2e/invitations-api.spec.ts`                                   | CI; local w/ Docker | Concurrent requests against real Postgres (row locks, unique indexes, triggers).                              |
+| Level          | Tool                                           | Location                                                                             | Runs                | What belongs here                                                                                             |
+| -------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------ | ------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Static         | TypeScript strict, ESLint, Prettier            | whole repo                                                                           | every commit        | Types, unsafe patterns (raw Supabase clients, `console`), formatting.                                         |
+| Unit           | Vitest (`unit`, node)                          | `src/**/*.test.ts`, `scripts/**`                                                     | every commit, ~1s   | Pure logic: schemas, guards, redirects, error mapping, slugs, roles, rate limits, time zones.                 |
+| Component      | Vitest (`components`, jsdom) + Testing Library | `src/**/*.test.tsx`                                                                  | every commit        | Client components' behaviour and accessibility (roles and labels, not CSS).                                   |
+| Database / RLS | Vitest (`db`) + PGlite                         | `supabase/tests/**/*.test.ts`                                                        | every commit, ~2s   | Real migrations and real policies under real roles: isolation, grants, triggers, constraints.                 |
+| E2E smoke      | Playwright (Chromium)                          | `e2e/smoke.spec.ts`                                                                  | every run           | Public surface, guards, validation and error paths. **Needs no Supabase.**                                    |
+| E2E flows      | Playwright (Chromium) + local Supabase         | `e2e/auth.spec.ts`, `workspaces.spec.ts`, `invitations.spec.ts`, `ownership.spec.ts` | CI; local w/ Docker | Signed-in journeys through real Auth, PostgREST, RLS and email (Mailpit): signup → onboarding → dashboard → … |
+| API races      | Playwright (no browser) + local Supabase       | `e2e/invitations-api.spec.ts`, `ownership-api.spec.ts`                               | CI; local w/ Docker | Concurrent requests against real Postgres (row locks, unique indexes, triggers).                              |
+| Confirmation   | Playwright + local Supabase, confirmation ON   | `e2e/confirmation/`                                                                  | CI (own job)        | Sign-up → Mailpit link → session; invitee confirms in the same browser / on another device.                   |
+| Database       | Supabase CLI + Docker                          | CI `database` job                                                                    | CI                  | Every migration from scratch, `supabase db lint`, generated types vs `database.types.ts`.                     |
+| Hosted gate    | `npm run verify:hosted` (Node, no browser)     | `scripts/verify-hosted.mts`                                                          | deploys, manual     | Staging/production from outside: Auth settings, JWT keys, health, headers, callback, invitation page.         |
+| Staging smoke  | Playwright against staging                     | `e2e-staging/`                                                                       | manual workflow     | The core journey on the hosted stack (real Turnstile test keys, Resend, confirmation).                        |
 
 Guidelines:
 
@@ -41,14 +45,17 @@ Supabase's platform (roles `anon`/`authenticated`/`service_role`/`supabase_auth_
 as real roles with real JWT claims. `createTestDb({ stopBefore })` stops before a given migration,
 so a test can create data in the old shape and check how the new migration treats it.
 
-| Suite                       | Covers                                                                                                                                     |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `tenancy-rls.test.ts`       | Sprint 0–1: signup, workspace creation, isolation, roles, last owner, profiles.                                                            |
-| `agency-hierarchy.test.ts`  | Sprint 2: agency → client access for every role, write policies, no re-parenting, hierarchy constraints, migration of existing workspaces. |
-| `profile-fields.test.ts`    | Sprint 2: time zone validation, business profile constraints and permissions, profile preferences.                                         |
-| `rate-limits.test.ts`       | Sprint 2: fixed-window counting, window reset, input checks, no access for anon/authenticated.                                             |
-| `invitations.test.ts`       | Sprint 3: the 17 required invitation scenarios (numbered), token lifecycle, preview, acceptance outcomes, last owner, audit log.           |
-| `client-workspaces.test.ts` | Sprint 3: who may create clients, parent derivation, clean start, slugs and names, profile constraints, website grant, audit.              |
+| Suite                         | Covers                                                                                                                                     |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `tenancy-rls.test.ts`         | Sprint 0–1: signup, workspace creation, isolation, roles, last owner, profiles.                                                            |
+| `agency-hierarchy.test.ts`    | Sprint 2: agency → client access for every role, write policies, no re-parenting, hierarchy constraints, migration of existing workspaces. |
+| `profile-fields.test.ts`      | Sprint 2: time zone validation, business profile constraints and permissions, profile preferences.                                         |
+| `rate-limits.test.ts`         | Sprint 2: fixed-window counting, window reset, input checks, no access for anon/authenticated.                                             |
+| `invitations.test.ts`         | Sprint 3: the 17 required invitation scenarios (numbered), token lifecycle, preview, acceptance outcomes, last owner, audit log.           |
+| `client-workspaces.test.ts`   | Sprint 3: who may create clients, parent derivation, clean start, slugs and names, profile constraints, website grant, audit.              |
+| `ownership.test.ts`           | Sprint 4: transfer, make-owner, the client continuity rule, leaving, role escalation, tenancy.                                             |
+| `audit-log.test.ts`           | Sprint 4: who reads the log (incl. agency inheritance, no cross-tenant), wording data without ids, filters, keyset paging, append-only.    |
+| `pending-invitations.test.ts` | Sprint 4: the verified-email pending list and accept-by-id: wrong/unverified email, expired, revoked, accepted, multiple, shared core.     |
 
 **Every migration that adds or changes a tenant-owned table must add tests proving:**
 
@@ -73,8 +80,18 @@ callable by anon or reusable by someone else; members allowed to invite; owner i
 address; members reading invitations; the token hash readable; resend not rotating the token;
 resend/revoke ignoring the workspace; stale delivery results applied; the accepted workspace's
 URL shown to anyone; clients under any workspace or created by agency members; duplicate client
-names; the membership audit trigger dropped; the audit log readable by users. Keep that
-property: a new rule isn't tested until a test fails when the rule is broken.
+names; the membership audit trigger dropped; the audit log readable by users. Sprint 4 repeated it
+for 23 mutations of its migration, each caught by at least one test: transfer by any member;
+transfer to a non-member; the caller keeping ownership; no ownership audit event; role changes
+double-logged during ownership changes; make-owner in agencies, by admins, or for non-members;
+owners granting ownership by direct update; no client continuity fallback; a fallback without a
+real agency owner; the last-owner rule dropped; the audit log readable by members, unscoped,
+callable by anon, returning raw metadata (ids), or honouring another workspace's cursor (missed on
+the first run, caught after strengthening the test); unverified, closed or anyone's invitations
+in the pending list; accept-by-id revealing state to non-invitees, skipping the email check, or
+callable by anon. The type-drift check was mutation-checked by hand (an edited
+`database.types.ts` fails it). Keep that property: a new rule isn't tested until a test fails
+when the rule is broken.
 
 PGlite limits: it doesn't emulate PostgREST, GoTrue, JWT verification or Storage. Behaviour
 that depends on those is covered by `e2e/auth.spec.ts` against a real local Supabase.
@@ -127,14 +144,51 @@ that depends on those is covered by `e2e/auth.spec.ts` against a real local Supa
 | Email env rules (local/staging/production)               | `lib/env/schema.test.ts`                                                                                                                                                        |
 | Invite dialog, member list, role change, removal, revoke | `invite-member-dialog.test.tsx`, `members-list.test.tsx`, `pending-invitations.test.tsx`                                                                                        |
 | Accept form, add-client form, switcher, invited sign-up  | `accept-invitation-form.test.tsx`, `create-client-form.test.tsx`, `workspace-switcher.test.tsx`, `signup-form.test.tsx`                                                         |
-| Journeys 1–7, resend/revoke/expiry, page caching         | `e2e/invitations.spec.ts` (emails read from Mailpit)                                                                                                                            |
+| Journeys 1–7, resend/revoke/expiry, page caching         | `e2e/invitations.spec.ts` (emails read from Mailpit); journey 7 moved to `e2e/ownership.spec.ts` in Sprint 4                                                                    |
+
+## Sprint 4 coverage map
+
+| Requirement                                                                                                                  | Where it's tested                                                                                                                                         |
+| ---------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Transfer: owner only, same-workspace direct member, atomic                                                                   | `supabase/tests/ownership.test.ts` "transferring ownership" 1–6; E2E `ownership.spec.ts` (UI, audit sentence)                                             |
+| Transfer concurrency (two at once, vs removal, vs demotion)                                                                  | `e2e/ownership-api.spec.ts` (real Postgres, 3 rounds each)                                                                                                |
+| Make owner: clients only, owners only, direct members only                                                                   | `ownership.test.ts` "making someone an owner" 1–6; E2E `ownership.spec.ts`                                                                                |
+| Client continuity rule; agencies keep a direct owner                                                                         | `ownership.test.ts` "client continuity rule" 1–6; E2E journey 7 (`ownership.spec.ts`)                                                                     |
+| Leave: member/admin, non-last owner, agency last owner, client last direct owner, transfer then leave, redirect, access gone | `ownership.test.ts` "leaving a workspace" 1–6; `lib/members.test.ts` (`leavePolicy`); `leave-workspace-card.test.tsx`; E2E `ownership.spec.ts`            |
+| Role escalation (the sprint's list)                                                                                          | `ownership.test.ts` "role escalation"; invitations suite 3, 6                                                                                             |
+| Tenancy (own clients only, no inheritance for members, no siblings)                                                          | `ownership.test.ts` "role escalation" (last test); `agency-hierarchy.test.ts`                                                                             |
+| Audit read path: owners/admins, inheritance, no cross-tenant, anon denied, append-only                                       | `supabase/tests/audit-log.test.ts` "who can read"                                                                                                         |
+| Audit events recorded and worded (all 11 types)                                                                              | `audit-log.test.ts` "what the log shows"; `features/audit-log/lib/events.test.ts`; E2E `ownership.spec.ts`                                                |
+| Audit filters, keyset paging, time-zone days, limits                                                                         | `audit-log.test.ts` "filters and paging"; `features/audit-log/schemas.test.ts`; E2E (filter, empty, bad range)                                            |
+| Pending invitations: verified email only, closed excluded, multiple, wrong email, cross-tenant, no token                     | `supabase/tests/pending-invitations.test.ts`; E2E `ownership.spec.ts` and `confirmation/`                                                                 |
+| Shared acceptance core (token and id paths)                                                                                  | `pending-invitations.test.ts` "shares one core", "rotated token"; the invitations suite                                                                   |
+| Email confirmation ON: sign-up, same-browser invitation, cross-device                                                        | `e2e/confirmation/confirmation.spec.ts` (CI job `e2e-confirmation`)                                                                                       |
+| Ownership, leave, audit and pending-list UI states                                                                           | `members-list.test.tsx`, `leave-workspace-card.test.tsx`, `audit-log.test.tsx`, `pending-invitation-list.test.tsx`                                        |
+| 375px layouts, focus return, Escape                                                                                          | E2E `ownership.spec.ts` "fit a 375px screen" and the pending-invitations test; component tests (Escape)                                                   |
+| Client search (name, business name, email, phone; injection-safe)                                                            | `lib/client-search.test.ts`; E2E `ownership.spec.ts`                                                                                                      |
+| Hosted gate, target guards, CI config override, type drift                                                                   | `scripts/verify-hosted.test.ts`, `e2e/support/targets.test.ts`, `scripts/ci/enable-email-confirmation.test.ts`; `db:types:check` mutation-checked by hand |
 
 ## Running the suites
 
 ```bash
 npm run check          # typecheck -> lint -> format:check -> all Vitest projects -> build
-npm run test:e2e       # Playwright (starts `next dev` or reuses one on :3000)
+npm run test:e2e       # Playwright, project chromium (starts `next dev` or reuses one on :3000)
+npm run db:types:check # generated types match the local database (needs the stack)
 ```
+
+The local suites refuse to run against anything but this machine (`e2e/support/targets.ts`): a
+non-loopback `PLAYWRIGHT_BASE_URL` or `NEXT_PUBLIC_SUPABASE_URL` stops Playwright before any
+test, because they create and delete users with the secret key.
+
+**Confirmation journeys** (`npm run test:e2e:confirmation`, `e2e/confirmation/`) need a stack
+with email confirmation on. To rehearse the CI job locally: `npx supabase stop`, then
+`node --experimental-strip-types scripts/ci/enable-email-confirmation.mts --allow-local`,
+`npx supabase start`, run them with `E2E_REQUIRE_EMAIL_CONFIRMATION=1`, and finally
+`git checkout supabase/config.toml` and restart the stack. Against a stack with confirmation off
+they skip.
+
+**Staging** (`npm run test:staging`) and the hosted gate (`npm run verify:hosted`) are described
+in `docs/DEPLOYMENT.md`; they never run on pull requests.
 
 `e2e/auth.spec.ts` needs a Supabase stack whose URL and keys match `.env.local`:
 
@@ -178,13 +232,19 @@ npm run test:e2e       # with `npm run db:start` running for the signed-in flows
 
 ### CI (GitHub Actions, `.github/workflows/ci.yml`), required to merge
 
-| Job       | Steps                                                                                                                                                                                                 |
-| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `quality` | `npm ci` → `typecheck` → `lint` (zero warnings) → `format:check` → `npm test` (unit + components + db) → `build`                                                                                      |
-| `e2e`     | `npm ci` → `supabase start` (Postgres, Auth, REST, Mailpit; our migrations) → export its URL/keys → install Chromium → `build` → `test:e2e` with `E2E_REQUIRE_SUPABASE=1`; report uploaded on failure |
+| Job                | Steps                                                                                                                                                                                                                     |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `quality`          | `npm ci` → `typecheck` → `lint` (zero warnings) → `format:check` → `npm test` (unit + components + db) → `build`                                                                                                          |
+| `database`         | `npm ci` → `supabase db start` (every migration from scratch; fails on invalid SQL) → `migration list --local` → `supabase db lint --local --level warning --fail-on warning` → `db:types:check` → `git diff --exit-code` |
+| `e2e`              | `npm ci` → `supabase start` (Postgres, Auth, REST, Mailpit; our migrations) → export its URL/keys → install Chromium → `build` → `test:e2e` with `E2E_REQUIRE_SUPABASE=1`; report uploaded on failure                     |
+| `e2e-confirmation` | as `e2e`, after `scripts/ci/enable-email-confirmation.mts` turns confirmation on (and `email_sent` up) in the runner's `config.toml`; runs `test:e2e:confirmation` with `E2E_REQUIRE_EMAIL_CONFIRMATION=1`                |
 
-Recommended branch protection on `main`: require both jobs, require up-to-date branches,
-no direct pushes.
+`supabase db lint` has no configured exceptions. If a finding is ever deliberate, add the
+narrowest possible exception here with the reason, never a blanket `--level error`. No CI job
+reads a GitHub Environment or secret: pull requests can't reach staging or production.
+
+Recommended branch protection on `main`: require all four jobs, require up-to-date branches,
+no direct pushes. The staging Vercel project's Deployment Checks require the same four.
 
 ## Definition of Done (per story)
 
@@ -234,6 +294,21 @@ no direct pushes.
   ("different account", sign out and continue), and as the invitee (accept, asked for a name if
   new). Staging: create an account from an invitation, confirm the email **in the same
   browser**, and land back on the invitation.
+- Ownership (Sprint 4): as a direct owner, transfer ownership to a member (type the workspace
+  name; the button stays disabled until it matches); you're an admin now and the audit log says
+  so in words. In a client, as the agency owner: "Make owner…" on a member, and no "Transfer".
+  Remove a client's only direct owner as the agency owner (allowed); as an agency admin you get
+  no actions on owners.
+- Leave: as a member (lands in another workspace or onboarding; the old URL says "Workspace not
+  found"); as an agency's last owner (button disabled, told to transfer first).
+- Audit log: as owner/admin, filter by action, person and dates; a start after the end is
+  flagged; "Older events" pages back; as a member the link is gone and the URL explains why.
+- Pending invitations: create an account from an invitation and confirm the email **on another
+  device**: onboarding lists the invitation, Accept joins; expired or cancelled ones don't show.
+- At 375px: the members menu, the transfer and leave dialogs, the audit log and onboarding
+  don't scroll sideways; Escape closes dialogs and focus returns to the menu button.
+- Staging: `verify:hosted` passes, the staging smoke passes, and a real inbox receives the
+  confirmation, reset and invitation emails (`docs/DEPLOYMENT.md` "Hosted verification").
 
 ## Flaky test policy
 
@@ -243,16 +318,14 @@ traces, not to excuse flakiness.
 
 ## Next steps for QA (backlog)
 
-1. E2E for the email-confirmation path with confirmation enabled, reading the link from the local
-   Mailpit API (the path staging and production use), including sign-up from an invitation
-   (the `df_pending_invitation` hop; today unit-tested and on the manual checklist).
-2. `supabase db lint` in CI to catch Supabase-specific schema issues PGlite can't see.
-3. A CI check that `npm run db:types` produces no diff, so migrations and types can't drift.
-4. Coverage reporting (`@vitest/coverage-v8`) with a floor on `src/lib` and `src/features/**/server`.
-5. Accessibility checks (`@axe-core/playwright`) on the auth pages, onboarding and settings.
-6. Preview-deployment smoke: run `PLAYWRIGHT_BASE_URL=<vercel preview url> npm run test:e2e`.
-7. Staging E2E with Cloudflare's always-pass Turnstile keys, to exercise the real widget and
-   `siteverify` path end to end.
+Done in Sprint 4: E2E with email confirmation on (`e2e-confirmation`), `supabase db lint` and a
+type-drift check in CI (`database`), and a staging smoke with Cloudflare's test keys (replacing the
+preview-URL idea: the local suites now refuse remote targets).
+
+1. Run the staging smoke on a schedule once staging exists, and alert on failure.
+2. Coverage reporting (`@vitest/coverage-v8`) with a floor on `src/lib` and `src/features/**/server`.
+3. Accessibility checks (`@axe-core/playwright`) on the auth pages, onboarding and settings.
+4. A test for the audit-log retention job once it exists.
 
 ## Stack notes for E2E
 
@@ -268,6 +341,10 @@ traces, not to excuse flakiness.
   Base UI's Combobox (real keyboards do; E2E types into it). While it's open, Base UI hides the rest
   of the page from assistive tech, so keep a reference to the input rather than re-querying it by
   role.
+- Confirmation emails from a PKCE sign-up carry a `token_hash` starting with `pkce_`: match
+  links by path (`authCallbackPathFrom`), not by a hex pattern.
+- After an action fails, its error can render before the transition ends: wait for the committed,
+  idle UI (e.g. `findByRole` for the re-enabled button) before retrying in a test.
 - A test that submits the same form repeatedly must wait for each action to settle (e.g. the
   password field being cleared) before typing again, or the pending action's form reset can wipe
   the next attempt's input.

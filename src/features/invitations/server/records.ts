@@ -101,7 +101,11 @@ export async function acceptInvitationRecord(tokenHash: string): Promise<AcceptO
   if (error) throw toInvitationWriteError(error)
   const row = data[0]
   if (!row) throw noRow("accept_workspace_invitation")
+  return toAcceptOutcome(row)
+}
 
+/** Both acceptance paths answer the same way (they share one database routine). */
+function toAcceptOutcome(row: { outcome: string; workspace_slug: string | null }): AcceptOutcome {
   if ((row.outcome === "accepted" || row.outcome === "already_member") && row.workspace_slug) {
     return {
       ok: true,
@@ -110,4 +114,16 @@ export async function acceptInvitationRecord(tokenHash: string): Promise<AcceptO
     }
   }
   return { ok: false, reason: row.outcome as AcceptFailure }
+}
+
+/** Accepts one of the caller's pending invitations by id (the onboarding list). */
+export async function acceptInvitationByIdRecord(invitationId: string): Promise<AcceptOutcome> {
+  const supabase = await createClient()
+  const { data, error } = await supabase.rpc("accept_workspace_invitation_by_id", {
+    p_invitation_id: invitationId,
+  })
+  if (error) throw toInvitationWriteError(error)
+  const row = data[0]
+  if (!row) throw noRow("accept_workspace_invitation_by_id")
+  return toAcceptOutcome(row)
 }

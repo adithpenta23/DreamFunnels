@@ -44,6 +44,19 @@ export const invitationTokenSchema = z
   .string({ error: "This invitation link isn't valid." })
   .regex(INVITATION_TOKEN_PATTERN, { error: "This invitation link isn't valid." })
 
+/**
+ * Accepting from the onboarding list: the invitation's id (only a reference:
+ * the database resolves the workspace and role and checks the verified
+ * email) and, for accounts without one, a name.
+ */
+export const acceptPendingInvitationSchema = z.object({
+  invitationId: z.uuid({ error: "Unknown invitation." }),
+  fullName: z.preprocess(
+    (value) => (value === null || value === "" ? undefined : value),
+    fullNameSchema.optional()
+  ),
+})
+
 export const acceptInvitationSchema = z.object({
   token: invitationTokenSchema,
   /** Asked for when the account has no name yet (new sign-ups skip onboarding). */

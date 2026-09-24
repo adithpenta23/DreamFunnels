@@ -3,7 +3,7 @@
 import { initialsOf } from "@/components/providers/app-context"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
-import { memberActionsFor } from "../lib/members"
+import { memberActionsFor, ownershipActionsFor } from "../lib/members"
 import { WORKSPACE_ROLE_LABELS, type WorkspaceRole } from "../lib/roles"
 import type { WorkspaceMember, WorkspaceType } from "../types"
 import { MemberRowActions } from "./member-row-actions"
@@ -17,13 +17,15 @@ type MembersListProps = {
   workspaceId: string
   workspaceName: string
   workspaceType: WorkspaceType
-  viewer: { userId: string; role: WorkspaceRole }
+  /** `role` is the effective role; `directRole` the viewer's own membership (null if inherited only). */
+  viewer: { userId: string; role: WorkspaceRole; directRole: WorkspaceRole | null }
   members: readonly MemberRow[]
 }
 
 /**
  * The workspace's direct members. Owners and admins get a menu per row
- * (change role, remove) where memberActionsFor() allows it; everyone else sees
+ * (change role, remove, and for owners transfer ownership / make owner) where
+ * memberActionsFor() and ownershipActionsFor() allow it; everyone else sees
  * the list read-only. The server re-checks every action.
  */
 export function MembersList({
@@ -57,6 +59,12 @@ export function MembersList({
           const isViewer = member.userId === viewer.userId
           const displayName = member.fullName?.trim() || member.email || "Unnamed member"
           const actions = memberActionsFor(viewer, member)
+          const ownership = ownershipActionsFor(viewer, member, workspaceType)
+          const hasActions =
+            actions.canChangeRole ||
+            actions.canRemove ||
+            ownership.canTransferOwnership ||
+            ownership.canMakeOwner
           return (
             <tr key={member.userId}>
               <td className="py-3 pr-3">
@@ -90,13 +98,14 @@ export function MembersList({
                 {member.joinedLabel}
               </td>
               <td className="py-3 text-right">
-                {actions.canChangeRole || actions.canRemove ? (
+                {hasActions ? (
                   <MemberRowActions
                     workspaceId={workspaceId}
                     workspaceName={workspaceName}
                     workspaceType={workspaceType}
                     member={{ userId: member.userId, role: member.role, displayName }}
                     actions={actions}
+                    ownership={ownership}
                   />
                 ) : null}
               </td>

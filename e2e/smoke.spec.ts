@@ -21,7 +21,7 @@ test("landing page renders with calls to action", async ({ page }) => {
 test("health endpoint responds with security headers", async ({ request }) => {
   const response = await request.get("/api/health")
   expect(response.ok()).toBe(true)
-  expect(await response.json()).toMatchObject({ status: "ok" })
+  expect(await response.json()).toMatchObject({ status: "ok", environment: "local" })
 
   const headers = response.headers()
   expect(headers["x-content-type-options"]).toBe("nosniff")

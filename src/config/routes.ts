@@ -18,6 +18,8 @@ export const routes = {
   workspaceSettings: (slug: string) => `${workspaceBase(slug)}/settings` as Route,
   workspaceMembers: (slug: string) => `${workspaceBase(slug)}/settings/members` as Route,
   accountSettings: (slug: string) => `${workspaceBase(slug)}/settings/account` as Route,
+  /** Membership and security events (owners and admins). */
+  auditLog: (slug: string) => `${workspaceBase(slug)}/settings/audit-log` as Route,
   /** An agency's client workspaces. */
   clients: (slug: string) => `${workspaceBase(slug)}/clients` as Route,
   newClient: (slug: string) => `${workspaceBase(slug)}/clients/new` as Route,

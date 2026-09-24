@@ -1,0 +1,61 @@
+name: Staging smoke
+
+# The hosted gate plus a browser journey through staging (playwright.staging.config.ts,
+# e2e-staging/). Manual only, in the GitHub Environment "staging"; never on pull
+# requests, never against production. See docs/DEPLOYMENT.md and docs/QA.md.
+#   secrets: SUPABASE_SECRET_KEY (staging project: creates/deletes the smoke's own users)
+#   vars:    NEXT_PUBLIC_APP_URL, NEXT_PUBLIC_SUPABASE_URL,
+#            NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
+#            PRODUCTION_APP_URL, PRODUCTION_SUPABASE_URL (optional; refused as targets)
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Staging smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: staging
+    env:
+      STAGING_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL }}
+      NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL }}
+      NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      PRODUCTION_APP_URL: ${{ vars.PRODUCTION_APP_URL }}
+      PRODUCTION_SUPABASE_URL: ${{ vars.PRODUCTION_SUPABASE_URL }}
+      VERIFY_EXPECT_APP_ENV: staging
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Hosted gate (verify:hosted)
+        run: npm run verify:hosted
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Staging journey
+        run: npm run test:staging
+
+      - name: Upload Playwright report
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-staging
+          path: playwright-report-staging/
+          retention-days: 3

@@ -3,7 +3,13 @@ import "server-only"
 import { AppError } from "@/lib/errors"
 import { createClient } from "@/lib/supabase/server"
 import type { AssignableMemberRole } from "../lib/members"
-import { toMemberWriteError } from "../lib/member-errors"
+import {
+  ownershipRefusalError,
+  toLeaveError,
+  toMemberWriteError,
+  toOwnershipWriteError,
+  type OwnershipRefusal,
+} from "../lib/member-errors"
 import { toWorkspaceWriteError } from "../lib/write-errors"
 import type { WorkspaceProfile } from "../types"
 
@@ -208,4 +214,57 @@ export async function removeMember(workspaceId: string, userId: string): Promise
 
   if (error) throw toMemberWriteError(error)
   if (!data) throw noLongerMember(workspaceId, userId)
+}
+
+/**
+ * Hands ownership to a direct member: they become an owner and the caller an
+ * admin, in one transaction (transfer_workspace_ownership). The database
+ * checks that the caller is a direct owner and the target a direct member.
+ */
+export async function transferOwnership(workspaceId: string, userId: string): Promise<void> {
+  const supabase = await createClient()
+  const { data, error } = await supabase.rpc("transfer_workspace_ownership", {
+    p_workspace_id: workspaceId,
+    p_new_owner_id: userId,
+  })
+  if (error) throw toOwnershipWriteError(error, "transfer")
+  if (data !== "transferred") throw ownershipRefusalError(data as OwnershipRefusal)
+}
+
+/**
+ * Makes a direct member of a client workspace an owner, keeping the caller's
+ * role (make_workspace_owner: client workspaces, owners only).
+ */
+export async function makeOwner(workspaceId: string, userId: string): Promise<void> {
+  const supabase = await createClient()
+  const { data, error } = await supabase.rpc("make_workspace_owner", {
+    p_workspace_id: workspaceId,
+    p_user_id: userId,
+  })
+  if (error) throw toOwnershipWriteError(error, "make_owner")
+  if (data !== "granted") throw ownershipRefusalError(data as OwnershipRefusal)
+}
+
+/**
+ * Removes the caller's own membership (RLS lets anyone leave). The last-owner
+ * trigger refuses an agency's last owner; a client's last direct owner may go,
+ * because its agency's owners keep owning it.
+ */
+export async function leaveWorkspace(workspaceId: string, userId: string): Promise<void> {
+  const supabase = await createClient()
+  const { data, error } = await supabase
+    .from("workspace_members")
+    .delete()
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", userId)
+    .select("user_id")
+    .maybeSingle()
+
+  if (error) throw toLeaveError(error)
+  if (!data) {
+    throw new AppError("NOT_FOUND", "You're no longer a member of this workspace.", {
+      expose: true,
+      context: { workspaceId },
+    })
+  }
 }

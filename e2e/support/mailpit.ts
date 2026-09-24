@@ -88,3 +88,16 @@ export async function deleteEmails(ids: readonly string[]): Promise<void> {
     body: JSON.stringify({ IDs: ids }),
   }).catch(() => undefined)
 }
+
+/**
+ * The Supabase Auth link in an email (confirmation, recovery), as a path on
+ * the app ("/auth/callback?token_hash=…&type=…&next=…"). The templates build
+ * it from the project's Site URL; only the path and query matter here.
+ */
+export function authCallbackPathFrom(email: CapturedEmail): string {
+  const match = /https?:\/\/[^\s"'<>]+?(\/auth\/callback\?[^\s"'<>]+)/.exec(
+    `${email.text}\n${email.html}`
+  )
+  if (!match?.[1]) throw new Error(`No auth link in "${email.subject}"`)
+  return match[1].replace(/&amp;/g, "&")
+}

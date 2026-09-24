@@ -189,6 +189,19 @@ export const changeMemberRoleSchema = memberRefSchema.extend({
   role: z.enum(ASSIGNABLE_MEMBER_ROLES, { error: "Choose member or admin." }),
 })
 
+/** Transfer ownership: the target plus the workspace name, typed to confirm. */
+export const transferOwnershipSchema = memberRefSchema.extend({
+  confirmation: z
+    .string({ error: "Type the workspace name to confirm." })
+    .trim()
+    .min(1, { error: "Type the workspace name to confirm." })
+    .max(120),
+})
+
+export const leaveWorkspaceSchema = z.object({
+  workspaceId: z.uuid({ error: "Unknown workspace." }),
+})
+
 /** The Clients page URL state: `?q=` search and `?page=`. Bad values fall back. */
 export const clientListParamsSchema = z.object({
   q: z

@@ -7,6 +7,7 @@ import { requireUser } from "@/features/auth/server/session"
 import { AppError } from "@/lib/errors"
 import { createClient } from "@/lib/supabase/server"
 import { authorizeWorkspaceAccess } from "../lib/access"
+import { clientSearchFilter } from "../lib/client-search"
 import { LAST_WORKSPACE_COOKIE, parseLastWorkspace } from "../lib/last-workspace"
 import type { WorkspaceRole } from "../lib/roles"
 import { WORKSPACE_SLUG_PATTERN } from "../lib/slug"
@@ -123,6 +124,28 @@ export const getFirstWorkspace = cache(async (): Promise<WorkspaceSummary | null
   return toSummary(data)
 })
 
+/**
+ * Where to go after leaving a workspace: the caller's oldest remaining
+ * workspace other than `excludeId` (never the one just left, even if access
+ * to it remains through an agency), or null (onboarding). Not memoised: it
+ * runs after a write in the same request.
+ */
+export async function findLandingWorkspace(excludeId: string): Promise<WorkspaceSummary | null> {
+  await requireUser()
+  const supabase = await createClient()
+  const { data, error } = await supabase
+    .from("workspaces")
+    .select(WORKSPACE_SUMMARY)
+    .neq("id", excludeId)
+    .order("workspace_type", { ascending: true })
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle()
+
+  if (error) throw loadFailed("workspaces", error)
+  return toSummary(data)
+}
+
 /** The workspace with the caller's role, or null if it doesn't exist or they have no access. */
 export const getWorkspaceBySlug = cache(async (slug: string): Promise<WorkspaceSummary | null> => {
   if (!WORKSPACE_SLUG_PATTERN.test(slug)) return null
@@ -203,14 +226,12 @@ export const getWorkspaceProfile = cache(async (workspaceId: string): Promise<Wo
   }
 })
 
-/** `%`, `_` and `\` are wildcards/escapes in LIKE patterns; match them literally. */
-const likePattern = (text: string) =>
-  `%${text.replace(/[\\%_]/g, (character) => `\\${character}`)}%`
-
 /**
  * One page of an agency's clients, by name, with member and invitation counts
- * (computed fields, so it's one query however many clients there are). Call it
- * after checking the caller manages clients; RLS applies regardless.
+ * (computed fields, so it's one query however many clients there are). The
+ * search matches name, business name, business email and phone
+ * (lib/client-search.ts). Call it after checking the caller manages clients;
+ * RLS applies regardless.
  */
 export async function listClients(
   agencyId: string,
@@ -228,7 +249,7 @@ export async function listClients(
     )
     .eq("parent_workspace_id", agencyId)
     .eq("workspace_type", "client")
-  if (options.search) query = query.ilike("name", likePattern(options.search))
+  if (options.search) query = query.or(clientSearchFilter(options.search))
 
   const { data, error, count } = await query
     .order("name", { ascending: true })

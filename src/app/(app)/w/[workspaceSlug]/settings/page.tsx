@@ -2,11 +2,19 @@ import type { Metadata } from "next"
 import { CopyField } from "@/components/forms/copy-field"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { requireUser } from "@/features/auth/server/session"
+import { LeaveWorkspaceCard } from "@/features/workspaces/components/leave-workspace-card"
 import { WorkspaceProfileForm } from "@/features/workspaces/components/workspace-profile-form"
 import { WorkspaceSettingsForm } from "@/features/workspaces/components/workspace-settings-form"
 import { canManageWorkspace } from "@/features/workspaces/lib/access"
+import { leavePolicy } from "@/features/workspaces/lib/members"
 import { WORKSPACE_ROLE_LABELS } from "@/features/workspaces/lib/roles"
-import { getWorkspaceProfile, requireWorkspaceMember } from "@/features/workspaces/server/queries"
+import {
+  getVisibleParentAgency,
+  getWorkspaceProfile,
+  listWorkspaceMembers,
+  requireWorkspaceMember,
+} from "@/features/workspaces/server/queries"
 import { countryOptions } from "@/lib/countries"
 import { timezoneOptions } from "@/lib/timezones"
 
@@ -18,9 +26,23 @@ export default async function WorkspaceSettingsPage({
   params,
 }: PageProps<"/w/[workspaceSlug]/settings">) {
   const { workspaceSlug } = await params
-  const workspace = await requireWorkspaceMember(workspaceSlug)
-  const profile = await getWorkspaceProfile(workspace.id)
+  const [workspace, viewer] = await Promise.all([
+    requireWorkspaceMember(workspaceSlug),
+    requireUser(),
+  ])
+  const [profile, members, agency] = await Promise.all([
+    getWorkspaceProfile(workspace.id),
+    listWorkspaceMembers(workspace.id),
+    getVisibleParentAgency(workspace),
+  ])
   const canManage = canManageWorkspace(workspace.role)
+  const leave = leavePolicy({
+    workspaceName: workspace.name,
+    workspaceType: workspace.type,
+    directRole: members.find((member) => member.userId === viewer.id)?.role ?? null,
+    directOwnerCount: members.filter((member) => member.role === "owner").length,
+    agency: agency ? { name: agency.name, role: agency.role } : null,
+  })
 
   return (
     <div className="grid gap-6">
@@ -97,6 +119,12 @@ export default async function WorkspaceSettingsPage({
           </dl>
         </CardContent>
       </Card>
+
+      <LeaveWorkspaceCard
+        workspaceId={workspace.id}
+        workspaceName={workspace.name}
+        policy={leave}
+      />
     </div>
   )
 }

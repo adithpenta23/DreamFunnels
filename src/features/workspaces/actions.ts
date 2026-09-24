@@ -1,5 +1,6 @@
 "use server"
 
+import type { Route } from "next"
 import { refresh } from "next/cache"
 import { redirect } from "next/navigation"
 import { routes } from "@/config/routes"
@@ -10,12 +11,14 @@ import { AppError, toPublicError } from "@/lib/errors"
 import { logger } from "@/lib/logger"
 import { runAction } from "@/lib/run-action"
 import { canonicalTimezone } from "@/lib/timezones"
-import { memberActionsFor } from "./lib/members"
+import { memberActionsFor, ownershipActionsFor } from "./lib/members"
 import {
   changeMemberRoleSchema,
   createClientSchema,
   createWorkspaceSchema,
+  leaveWorkspaceSchema,
   memberRefSchema,
+  transferOwnershipSchema,
   updateWorkspaceProfileSchema,
   updateWorkspaceSchema,
 } from "./schemas"
@@ -23,11 +26,18 @@ import {
   changeMemberRole,
   createClientWorkspace,
   createWorkspace,
+  leaveWorkspace,
+  makeOwner,
   removeMember,
+  transferOwnership,
   updateWorkspace,
   updateWorkspaceProfile,
 } from "./server/mutations"
-import { listWorkspaceMembers, requireWorkspaceAccess } from "./server/queries"
+import {
+  findLandingWorkspace,
+  listWorkspaceMembers,
+  requireWorkspaceAccess,
+} from "./server/queries"
 import { limitClientCreation } from "./server/rate-limits"
 import type { WorkspaceProfile, WorkspaceSummary } from "./types"
 
@@ -319,5 +329,141 @@ export async function removeMemberAction(input: {
     logger.info("workspaces.member_removed", { workspaceId: workspace.id, targetUserId: userId })
     refresh()
     return null
+  })
+}
+
+// --- Ownership and leaving ------------------------------------------------------
+
+/**
+ * Loads the target of an ownership change and what the caller may do to them
+ * (ownershipActionsFor, the same rule the menu uses). The database functions
+ * check again under row locks.
+ */
+async function authorizeOwnershipChange(
+  workspaceId: string,
+  userId: string,
+  action: "canTransferOwnership" | "canMakeOwner"
+) {
+  const viewer = await requireUser()
+  const workspace = await requireWorkspaceAccess(
+    workspaceId,
+    "owner",
+    "Only owners can change who owns this workspace."
+  )
+  const members = await listWorkspaceMembers(workspace.id)
+  const target = members.find((member) => member.userId === userId)
+  if (!target) {
+    throw new AppError("NOT_FOUND", "That person is no longer a member of this workspace.", {
+      expose: true,
+      context: { workspaceId: workspace.id },
+    })
+  }
+  const directRole = members.find((member) => member.userId === viewer.id)?.role ?? null
+  const allowed = ownershipActionsFor(
+    { userId: viewer.id, role: workspace.role, directRole },
+    target,
+    workspace.type
+  )[action]
+  if (!allowed) {
+    throw new AppError(
+      "FORBIDDEN",
+      action === "canTransferOwnership"
+        ? "Only a direct owner of this workspace can transfer its ownership."
+        : "Only owners of a client workspace can make someone an owner.",
+      { expose: true, context: { workspaceId: workspace.id, target: target.role } }
+    )
+  }
+  return { workspace, target }
+}
+
+const displayNameOf = (member: { fullName: string | null; email: string | null }) =>
+  member.fullName?.trim() || member.email || "They"
+
+/**
+ * Transfers ownership to a direct member (the caller becomes an admin). The
+ * caller confirms by typing the workspace's name, checked here as well.
+ */
+export async function transferOwnershipAction(input: {
+  workspaceId: string
+  userId: string
+  confirmation: string
+}): Promise<ActionResult<{ newOwnerName: string }>> {
+  const parsed = transferOwnershipSchema.safeParse(input)
+  if (!parsed.success) return validationFailed(parsed.error)
+  const { workspaceId, userId, confirmation } = parsed.data
+
+  return runAction("workspaces.transferOwnership", async () => {
+    const { workspace, target } = await authorizeOwnershipChange(
+      workspaceId,
+      userId,
+      "canTransferOwnership"
+    )
+    if (confirmation !== workspace.name.trim()) {
+      throw new AppError("VALIDATION", "Confirmation doesn't match", {
+        context: { workspaceId: workspace.id },
+        fieldErrors: { confirmation: [`Type ${workspace.name.trim()} exactly to confirm.`] },
+      })
+    }
+    await transferOwnership(workspace.id, target.userId)
+    logger.info("workspace.ownership_transferred", {
+      workspaceId: workspace.id,
+      targetUserId: target.userId,
+    })
+    refresh()
+    return { newOwnerName: displayNameOf(target) }
+  })
+}
+
+/** Makes a direct member of a client workspace an owner too (owners only). */
+export async function makeOwnerAction(input: {
+  workspaceId: string
+  userId: string
+}): Promise<ActionResult<null>> {
+  const parsed = memberRefSchema.safeParse(input)
+  if (!parsed.success) return validationFailed(parsed.error)
+  const { workspaceId, userId } = parsed.data
+
+  return runAction("workspaces.makeOwner", async () => {
+    const { workspace, target } = await authorizeOwnershipChange(
+      workspaceId,
+      userId,
+      "canMakeOwner"
+    )
+    await makeOwner(workspace.id, target.userId)
+    logger.info("workspace.owner_granted", {
+      workspaceId: workspace.id,
+      targetUserId: target.userId,
+    })
+    refresh()
+    return null
+  })
+}
+
+/**
+ * Leaves a workspace (your own direct membership). Returns where to go next:
+ * another workspace you can open, never the one just left, or onboarding.
+ */
+export async function leaveWorkspaceAction(input: {
+  workspaceId: string
+}): Promise<ActionResult<{ destination: Route }>> {
+  const parsed = leaveWorkspaceSchema.safeParse(input)
+  if (!parsed.success) return validationFailed(parsed.error)
+
+  return runAction("workspaces.leave", async () => {
+    const viewer = await requireUser()
+    const workspace = await requireWorkspaceAccess(parsed.data.workspaceId, "member")
+    const members = await listWorkspaceMembers(workspace.id)
+    if (!members.some((member) => member.userId === viewer.id)) {
+      throw new AppError(
+        "FORBIDDEN",
+        "You manage this workspace through your agency, so there's no membership to leave.",
+        { expose: true, context: { workspaceId: workspace.id } }
+      )
+    }
+    await leaveWorkspace(workspace.id, viewer.id)
+    logger.info("workspace.member_left", { workspaceId: workspace.id })
+
+    const landing = await findLandingWorkspace(workspace.id)
+    return { destination: landing ? routes.workspace(landing.slug) : routes.onboarding }
   })
 }

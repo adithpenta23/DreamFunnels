@@ -376,39 +376,8 @@ test("6. an admin can manage members but never an owner", async ({ page, browser
   await adminPage.context().close()
 })
 
-test("7. the last owner of a workspace can't be removed or demoted", async ({ page }) => {
-  test.slow()
-  const { client } = await agencyOwnerWithClient(page, "owner7")
-  // A client whose only direct owner is someone from the business.
-  const soleOwner = testUser("soleowner")
-  const soleOwnerId = await createConfirmedUser({ ...soleOwner })
-  await addMembership(client.id, soleOwnerId, "owner")
-
-  await page.goto(`/w/${client.slug}/settings/members`)
-  const actions = page.getByRole("button", { name: `Actions for ${soleOwner.fullName}` })
-
-  await openMenu(page, actions)
-  await page.getByRole("menuitem", { name: "Remove from workspace…" }).click()
-  const confirm = page.getByRole("alertdialog")
-  await confirm.getByRole("button", { name: "Remove member" }).click()
-  await expect(confirm.getByRole("alert")).toContainText("needs at least one owner")
-  await confirm.getByRole("button", { name: "Cancel" }).click()
-
-  await openMenu(page, actions)
-  await page.getByRole("menuitem", { name: "Change role…" }).click()
-  const dialog = page.getByRole("dialog", { name: /^Change .* role$/ })
-  await expect(dialog).toContainText("removes their ownership")
-  await dialog.getByRole("button", { name: "Save role" }).click()
-  await expect(dialog.getByRole("alert")).toContainText("needs at least one owner")
-
-  const { data } = await adminClient()!
-    .from("workspace_members")
-    .select("role")
-    .eq("workspace_id", client.id)
-    .eq("user_id", soleOwnerId)
-    .single()
-  expect(data?.role).toBe("owner")
-})
+// Journey 7 (last owner) moved to e2e/ownership.spec.ts in Sprint 4: a client may now lose its
+// last direct owner (its agency owns it), while an agency keeps its last owner.
 
 test("resending replaces the link, revoking kills it, and expiry is enforced", async ({
   page,
